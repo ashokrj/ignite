@@ -17,40 +17,8 @@
 
 package org.apache.ignite.internal.binary;
 
-import org.apache.ignite.IgniteCheckedException;
-import org.apache.ignite.binary.BinaryIdMapper;
-import org.apache.ignite.binary.BinaryInvalidTypeException;
-import org.apache.ignite.binary.BinaryObjectException;
-import org.apache.ignite.binary.BinarySerializer;
-import org.apache.ignite.binary.BinaryType;
-import org.apache.ignite.binary.BinaryTypeConfiguration;
-import org.apache.ignite.cache.CacheKeyConfiguration;
-import org.apache.ignite.cache.affinity.AffinityKeyMapped;
-import org.apache.ignite.configuration.BinaryConfiguration;
-import org.apache.ignite.configuration.IgniteConfiguration;
-import org.apache.ignite.internal.IgniteKernal;
-import org.apache.ignite.internal.IgnitionEx;
-import org.apache.ignite.internal.processors.cache.binary.CacheObjectBinaryProcessorImpl;
-import org.apache.ignite.internal.processors.datastructures.CollocatedQueueItemKey;
-import org.apache.ignite.internal.processors.datastructures.CollocatedSetItemKey;
-import org.apache.ignite.internal.util.IgniteUtils;
-import org.apache.ignite.internal.util.lang.GridMapEntry;
-import org.apache.ignite.internal.util.typedef.F;
-import org.apache.ignite.internal.util.typedef.T2;
-import org.apache.ignite.internal.util.typedef.internal.U;
-import org.apache.ignite.lang.IgniteBiTuple;
-import org.apache.ignite.marshaller.MarshallerContext;
-import org.apache.ignite.marshaller.optimized.OptimizedMarshaller;
-import org.jetbrains.annotations.Nullable;
-import org.jsr166.ConcurrentHashMap8;
-
-import java.io.Externalizable;
 import java.io.File;
 import java.io.IOException;
-import java.io.InvalidObjectException;
-import java.io.ObjectInput;
-import java.io.ObjectOutput;
-import java.io.ObjectStreamException;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.net.URISyntaxException;
@@ -73,22 +41,117 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentMap;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import org.apache.ignite.IgniteCheckedException;
+import org.apache.ignite.IgniteException;
+import org.apache.ignite.IgniteLogger;
+import org.apache.ignite.binary.BinaryBasicIdMapper;
+import org.apache.ignite.binary.BinaryBasicNameMapper;
+import org.apache.ignite.binary.BinaryIdMapper;
+import org.apache.ignite.binary.BinaryInvalidTypeException;
+import org.apache.ignite.binary.BinaryNameMapper;
+import org.apache.ignite.binary.BinaryObjectException;
+import org.apache.ignite.binary.BinaryReflectiveSerializer;
+import org.apache.ignite.binary.BinarySerializer;
+import org.apache.ignite.binary.BinaryType;
+import org.apache.ignite.binary.BinaryTypeConfiguration;
+import org.apache.ignite.cache.CacheKeyConfiguration;
+import org.apache.ignite.cache.affinity.AffinityKey;
+import org.apache.ignite.cache.affinity.AffinityKeyMapped;
+import org.apache.ignite.configuration.BinaryConfiguration;
+import org.apache.ignite.configuration.IgniteConfiguration;
+import org.apache.ignite.igfs.IgfsPath;
+import org.apache.ignite.internal.processors.cache.binary.BinaryMetadataKey;
+import org.apache.ignite.internal.processors.closure.GridClosureProcessor;
+import org.apache.ignite.internal.processors.datastructures.CollocatedQueueItemKey;
+import org.apache.ignite.internal.processors.datastructures.CollocatedSetItemKey;
+import org.apache.ignite.internal.processors.igfs.IgfsBlockKey;
+import org.apache.ignite.internal.processors.igfs.IgfsDirectoryInfo;
+import org.apache.ignite.internal.processors.igfs.IgfsFileAffinityRange;
+import org.apache.ignite.internal.processors.igfs.IgfsFileInfo;
+import org.apache.ignite.internal.processors.igfs.IgfsFileMap;
+import org.apache.ignite.internal.processors.igfs.IgfsListingEntry;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaDirectoryCreateProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaDirectoryListingAddProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaDirectoryListingRemoveProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaDirectoryListingReplaceProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaFileCreateProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaFileLockProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaFileRangeDeleteProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaFileRangeUpdateProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaFileReserveSpaceProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaFileUnlockProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaUpdatePropertiesProcessor;
+import org.apache.ignite.internal.processors.igfs.meta.IgfsMetaUpdateTimesProcessor;
+import org.apache.ignite.internal.processors.platform.PlatformJavaObjectFactoryProxy;
+import org.apache.ignite.internal.util.IgniteUtils;
+import org.apache.ignite.internal.util.lang.GridMapEntry;
+import org.apache.ignite.internal.util.typedef.F;
+import org.apache.ignite.internal.util.typedef.T2;
+import org.apache.ignite.internal.util.typedef.internal.U;
+import org.apache.ignite.lang.IgniteBiTuple;
+import org.apache.ignite.marshaller.MarshallerContext;
+import org.apache.ignite.marshaller.optimized.OptimizedMarshaller;
+import org.jetbrains.annotations.Nullable;
+import org.jsr166.ConcurrentHashMap8;
 
 /**
  * Binary context.
  */
-public class BinaryContext implements Externalizable {
-    /** */
-    private static final long serialVersionUID = 0L;
+public class BinaryContext {
+    /** System loader.*/
+    private static final ClassLoader sysLdr = U.gridClassLoader();
 
     /** */
-    private static final ClassLoader dfltLdr = U.gridClassLoader();
+    private static final BinaryInternalMapper DFLT_MAPPER =
+        new BinaryInternalMapper(new BinaryBasicNameMapper(false), new BinaryBasicIdMapper(true), false);
+
+    /** */
+    static final BinaryInternalMapper SIMPLE_NAME_LOWER_CASE_MAPPER =
+        new BinaryInternalMapper(new BinaryBasicNameMapper(true), new BinaryBasicIdMapper(true), false);
+
+    /** Set of system classes that should be marshalled with BinaryMarshaller. */
+    private static final Set<String> BINARYLIZABLE_SYS_CLSS;
+
+    /** Binarylizable system classes set initialization. */
+    static {
+        Set<String> sysClss = new HashSet<>();
+
+        // IGFS classes.
+        sysClss.add(IgfsPath.class.getName());
+
+        sysClss.add(IgfsBlockKey.class.getName());
+        sysClss.add(IgfsDirectoryInfo.class.getName());
+        sysClss.add(IgfsFileAffinityRange.class.getName());
+        sysClss.add(IgfsFileInfo.class.getName());
+        sysClss.add(IgfsFileMap.class.getName());
+        sysClss.add(IgfsListingEntry.class.getName());
+
+        sysClss.add(IgfsMetaDirectoryCreateProcessor.class.getName());
+        sysClss.add(IgfsMetaDirectoryListingAddProcessor.class.getName());
+        sysClss.add(IgfsMetaDirectoryListingRemoveProcessor.class.getName());
+        sysClss.add(IgfsMetaDirectoryListingReplaceProcessor.class.getName());
+        sysClss.add(IgfsMetaFileCreateProcessor.class.getName());
+        sysClss.add(IgfsMetaFileLockProcessor.class.getName());
+        sysClss.add(IgfsMetaFileRangeDeleteProcessor.class.getName());
+        sysClss.add(IgfsMetaFileRangeUpdateProcessor.class.getName());
+        sysClss.add(IgfsMetaFileReserveSpaceProcessor.class.getName());
+        sysClss.add(IgfsMetaFileUnlockProcessor.class.getName());
+        sysClss.add(IgfsMetaUpdatePropertiesProcessor.class.getName());
+        sysClss.add(IgfsMetaUpdateTimesProcessor.class.getName());
+
+        // Closure processor classes.
+        sysClss.add(GridClosureProcessor.C1V2.class.getName());
+        sysClss.add(GridClosureProcessor.C1MLAV2.class.getName());
+        sysClss.add(GridClosureProcessor.C2V2.class.getName());
+        sysClss.add(GridClosureProcessor.C2MLAV2.class.getName());
+        sysClss.add(GridClosureProcessor.C4V2.class.getName());
+        sysClss.add(GridClosureProcessor.C4MLAV2.class.getName());
+
+        BINARYLIZABLE_SYS_CLSS = Collections.unmodifiableSet(sysClss);
+    }
 
     /** */
     private final ConcurrentMap<Class<?>, BinaryClassDescriptor> descByCls = new ConcurrentHashMap8<>();
-
-    /** Holds classes loaded by default class loader only. */
-    private final ConcurrentMap<Integer, BinaryClassDescriptor> userTypes = new ConcurrentHashMap8<>();
 
     /** */
     private final Map<Integer, BinaryClassDescriptor> predefinedTypes = new HashMap<>();
@@ -102,14 +165,14 @@ public class BinaryContext implements Externalizable {
     /** */
     private final Map<Class<? extends Map>, Byte> mapTypes = new HashMap<>();
 
-    /** */
-    private final ConcurrentMap<Integer, BinaryIdMapper> mappers = new ConcurrentHashMap8<>(0);
+    /** Maps typeId to mappers. */
+    private final ConcurrentMap<Integer, BinaryInternalMapper> typeId2Mapper = new ConcurrentHashMap8<>(0);
 
     /** Affinity key field names. */
     private final ConcurrentMap<Integer, String> affKeyFieldNames = new ConcurrentHashMap8<>(0);
 
-    /** */
-    private final Map<String, BinaryIdMapper> typeMappers = new ConcurrentHashMap8<>(0);
+    /** Maps className to mapper */
+    private final ConcurrentMap<String, BinaryInternalMapper> cls2Mappers = new ConcurrentHashMap8<>(0);
 
     /** */
     private BinaryMetadataHandler metaHnd;
@@ -121,13 +184,13 @@ public class BinaryContext implements Externalizable {
     private MarshallerContext marshCtx;
 
     /** */
-    private String gridName;
-
-    /** */
     private IgniteConfiguration igniteCfg;
 
+    /** Logger. */
+    private IgniteLogger log;
+
     /** */
-    private final OptimizedMarshaller optmMarsh = new OptimizedMarshaller();
+    private final OptimizedMarshaller optmMarsh = new OptimizedMarshaller(false);
 
     /** Compact footer flag. */
     private boolean compactFooter;
@@ -136,24 +199,17 @@ public class BinaryContext implements Externalizable {
     private volatile Map<Integer, BinarySchemaRegistry> schemas;
 
     /**
-     * For {@link Externalizable}.
-     */
-    public BinaryContext() {
-        // No-op.
-    }
-
-    /**
      * @param metaHnd Meta data handler.
      * @param igniteCfg Ignite configuration.
+     * @param log Logger.
      */
-    public BinaryContext(BinaryMetadataHandler metaHnd, IgniteConfiguration igniteCfg) {
+    public BinaryContext(BinaryMetadataHandler metaHnd, IgniteConfiguration igniteCfg, IgniteLogger log) {
         assert metaHnd != null;
         assert igniteCfg != null;
 
         this.metaHnd = metaHnd;
         this.igniteCfg = igniteCfg;
-
-        gridName = igniteCfg.getGridName();
+        this.log = log;
 
         colTypes.put(ArrayList.class, GridBinaryMarshaller.ARR_LIST);
         colTypes.put(LinkedList.class, GridBinaryMarshaller.LINKED_LIST);
@@ -194,19 +250,38 @@ public class BinaryContext implements Externalizable {
         registerPredefinedType(Timestamp[].class, GridBinaryMarshaller.TIMESTAMP_ARR);
         registerPredefinedType(Object[].class, GridBinaryMarshaller.OBJ_ARR);
 
+        // Special collections.
         registerPredefinedType(ArrayList.class, 0);
         registerPredefinedType(LinkedList.class, 0);
         registerPredefinedType(HashSet.class, 0);
         registerPredefinedType(LinkedHashSet.class, 0);
-
         registerPredefinedType(HashMap.class, 0);
         registerPredefinedType(LinkedHashMap.class, 0);
+
+        // Classes with overriden default serialization flag.
+        registerPredefinedType(AffinityKey.class, 0, affinityFieldName(AffinityKey.class));
 
         registerPredefinedType(GridMapEntry.class, 60);
         registerPredefinedType(IgniteBiTuple.class, 61);
         registerPredefinedType(T2.class, 62);
 
+        registerPredefinedType(PlatformJavaObjectFactoryProxy.class,
+            GridBinaryMarshaller.PLATFORM_JAVA_OBJECT_FACTORY_PROXY);
+
+        registerPredefinedType(BinaryObjectImpl.class, 0);
+        registerPredefinedType(BinaryObjectOffheapImpl.class, 0);
+        registerPredefinedType(BinaryMetadataKey.class, 0);
+        registerPredefinedType(BinaryMetadata.class, 0);
+        registerPredefinedType(BinaryEnumObjectImpl.class, 0);
+
         // IDs range [200..1000] is used by Ignite internal APIs.
+    }
+
+    /**
+     * @return Logger.
+     */
+    public IgniteLogger log() {
+        return log;
     }
 
     /**
@@ -217,9 +292,24 @@ public class BinaryContext implements Externalizable {
     }
 
     /**
+     * Check whether class must be deserialized anyway.
+     *
+     * @param cls Class.
+     * @return {@code True} if must be deserialized.
+     */
+    public boolean mustDeserialize(Class cls) {
+        BinaryClassDescriptor desc = descByCls.get(cls);
+
+        if (desc == null)
+            return marshCtx.isSystemType(cls.getName()) || serializerForClass(cls) == null;
+        else
+            return desc.useOptimizedMarshaller();
+    }
+
+    /**
      * @return Ignite configuration.
      */
-    public IgniteConfiguration configuration(){
+    public IgniteConfiguration configuration() {
         return igniteCfg;
     }
 
@@ -246,6 +336,7 @@ public class BinaryContext implements Externalizable {
         optmMarsh.setContext(marshCtx);
 
         configure(
+            binaryCfg.getNameMapper(),
             binaryCfg.getIdMapper(),
             binaryCfg.getSerializer(),
             binaryCfg.getTypeConfigurations()
@@ -261,6 +352,7 @@ public class BinaryContext implements Externalizable {
      * @throws BinaryObjectException In case of error.
      */
     private void configure(
+        BinaryNameMapper globalNameMapper,
         BinaryIdMapper globalIdMapper,
         BinarySerializer globalSerializer,
         Collection<BinaryTypeConfiguration> typeCfgs
@@ -281,13 +373,20 @@ public class BinaryContext implements Externalizable {
                 if (clsName == null)
                     throw new BinaryObjectException("Class name is required for binary type configuration.");
 
+                // Resolve mapper.
                 BinaryIdMapper idMapper = globalIdMapper;
 
                 if (typeCfg.getIdMapper() != null)
                     idMapper = typeCfg.getIdMapper();
 
-                idMapper = BinaryInternalIdMapper.create(idMapper);
+                BinaryNameMapper nameMapper = globalNameMapper;
 
+                if (typeCfg.getNameMapper() != null)
+                    nameMapper = typeCfg.getNameMapper();
+
+                BinaryInternalMapper mapper = resolveMapper(nameMapper, idMapper);
+
+                // Resolve serializer.
                 BinarySerializer serializer = globalSerializer;
 
                 if (typeCfg.getSerializer() != null)
@@ -297,31 +396,77 @@ public class BinaryContext implements Externalizable {
                     String pkgName = clsName.substring(0, clsName.length() - 2);
 
                     for (String clsName0 : classesInPackage(pkgName))
-                        descs.add(clsName0, idMapper, serializer, affFields.get(clsName0),
+                        descs.add(clsName0, mapper, serializer, affFields.get(clsName0),
                             typeCfg.isEnum(), true);
                 }
                 else
-                    descs.add(clsName, idMapper, serializer, affFields.get(clsName),
+                    descs.add(clsName, mapper, serializer, affFields.get(clsName),
                         typeCfg.isEnum(), false);
             }
         }
 
         for (TypeDescriptor desc : descs.descriptors())
-            registerUserType(desc.clsName, desc.idMapper, desc.serializer, desc.affKeyFieldName, desc.isEnum);
+            registerUserType(desc.clsName, desc.mapper, desc.serializer, desc.affKeyFieldName, desc.isEnum);
 
-        BinaryInternalIdMapper dfltMapper = BinaryInternalIdMapper.create(globalIdMapper);
+        BinaryInternalMapper globalMapper = resolveMapper(globalNameMapper, globalIdMapper);
 
         // Put affinity field names for unconfigured types.
         for (Map.Entry<String, String> entry : affFields.entrySet()) {
             String typeName = entry.getKey();
 
-            int typeId = dfltMapper.typeId(typeName);
+            int typeId = globalMapper.typeId(typeName);
 
             affKeyFieldNames.putIfAbsent(typeId, entry.getValue());
         }
 
         addSystemClassAffinityKey(CollocatedSetItemKey.class);
         addSystemClassAffinityKey(CollocatedQueueItemKey.class);
+    }
+
+    /**
+     * @param nameMapper Name mapper.
+     * @param idMapper ID mapper.
+     * @return Mapper.
+     */
+    private static BinaryInternalMapper resolveMapper(BinaryNameMapper nameMapper, BinaryIdMapper idMapper) {
+        if ((nameMapper == null || (DFLT_MAPPER.nameMapper().equals(nameMapper)))
+            && (idMapper == null || DFLT_MAPPER.idMapper().equals(idMapper)))
+            return DFLT_MAPPER;
+
+        if (nameMapper != null && nameMapper instanceof BinaryBasicNameMapper
+            && ((BinaryBasicNameMapper)nameMapper).isSimpleName()
+            && idMapper != null && idMapper instanceof BinaryBasicIdMapper
+            && ((BinaryBasicIdMapper)idMapper).isLowerCase())
+            return SIMPLE_NAME_LOWER_CASE_MAPPER;
+
+        if (nameMapper == null)
+            nameMapper = DFLT_MAPPER.nameMapper();
+
+        if (idMapper == null)
+            idMapper = DFLT_MAPPER.idMapper();
+
+        return new BinaryInternalMapper(nameMapper, idMapper, true);
+    }
+
+    /**
+     * @return Intenal mpper used as default.
+     */
+    public static BinaryInternalMapper defaultMapper() {
+        return DFLT_MAPPER;
+    }
+
+    /**
+     * @return ID mapper used as default.
+     */
+    public static BinaryIdMapper defaultIdMapper() {
+        return DFLT_MAPPER.idMapper();
+    }
+
+    /**
+     * @return Name mapper used as default.
+     */
+    public static BinaryNameMapper defaultNameMapper() {
+        return DFLT_MAPPER.nameMapper();
     }
 
     /**
@@ -414,8 +559,13 @@ public class BinaryContext implements Externalizable {
 
         BinaryClassDescriptor desc = descByCls.get(cls);
 
-        if (desc == null || !desc.registered())
+        if (desc == null)
             desc = registerClassDescriptor(cls, deserialize);
+        else if (!desc.registered()) {
+            assert desc.userType();
+
+            desc = registerUserClassDescriptor(desc);
+        }
 
         return desc;
     }
@@ -441,16 +591,7 @@ public class BinaryContext implements Externalizable {
             return desc;
 
         if (ldr == null)
-            ldr = dfltLdr;
-
-        // If the type hasn't been loaded by default class loader then we mustn't return the descriptor from here
-        // giving a chance to a custom class loader to reload type's class.
-        if (userType && ldr.equals(dfltLdr)) {
-            desc = userTypes.get(typeId);
-
-            if (desc != null)
-                return desc;
-        }
+            ldr = sysLdr;
 
         Class cls;
 
@@ -461,14 +602,14 @@ public class BinaryContext implements Externalizable {
         }
         catch (ClassNotFoundException e) {
             // Class might have been loaded by default class loader.
-            if (userType && !ldr.equals(dfltLdr) && (desc = descriptorForTypeId(true, typeId, dfltLdr, deserialize)) != null)
+            if (userType && !ldr.equals(sysLdr) && (desc = descriptorForTypeId(true, typeId, sysLdr, deserialize)) != null)
                 return desc;
 
             throw new BinaryInvalidTypeException(e);
         }
         catch (IgniteCheckedException e) {
             // Class might have been loaded by default class loader.
-            if (userType && !ldr.equals(dfltLdr) && (desc = descriptorForTypeId(true, typeId, dfltLdr, deserialize)) != null)
+            if (userType && !ldr.equals(sysLdr) && (desc = descriptorForTypeId(true, typeId, sysLdr, deserialize)) != null)
                 return desc;
 
             throw new BinaryObjectException("Failed resolve class for ID: " + typeId, e);
@@ -477,7 +618,8 @@ public class BinaryContext implements Externalizable {
         if (desc == null) {
             desc = registerClassDescriptor(cls, deserialize);
 
-            assert desc.typeId() == typeId;
+            assert desc.typeId() == typeId : "Duplicate typeId [typeId=" + typeId + ", cls=" + cls
+                + ", desc=" + desc + "]";
         }
 
         return desc;
@@ -495,17 +637,21 @@ public class BinaryContext implements Externalizable {
         String clsName = cls.getName();
 
         if (marshCtx.isSystemType(clsName)) {
+            BinarySerializer serializer = null;
+
+            if (BINARYLIZABLE_SYS_CLSS.contains(clsName))
+                serializer = new BinaryReflectiveSerializer();
+
             desc = new BinaryClassDescriptor(this,
                 cls,
                 false,
                 clsName.hashCode(),
                 clsName,
                 null,
-                BinaryInternalIdMapper.defaultInstance(),
-                null,
+                SIMPLE_NAME_LOWER_CASE_MAPPER,
+                serializer,
                 false,
-                true, /* registered */
-                false /* predefined */
+                true /* registered */
             );
 
             BinaryClassDescriptor old = descByCls.putIfAbsent(cls, desc);
@@ -528,11 +674,13 @@ public class BinaryContext implements Externalizable {
     private BinaryClassDescriptor registerUserClassDescriptor(Class<?> cls, boolean deserialize) {
         boolean registered;
 
-        String typeName = typeName(cls.getName());
+        final String clsName = cls.getName();
 
-        BinaryIdMapper idMapper = userTypeIdMapper(typeName);
+        BinaryInternalMapper mapper = userTypeMapper(clsName);
 
-        int typeId = idMapper.typeId(typeName);
+        final String typeName = mapper.typeName(clsName);
+
+        final int typeId = mapper.typeId(clsName);
 
         try {
             registered = marshCtx.registerClass(typeId, cls);
@@ -540,6 +688,8 @@ public class BinaryContext implements Externalizable {
         catch (IgniteCheckedException e) {
             throw new BinaryObjectException("Failed to register class.", e);
         }
+
+        BinarySerializer serializer = serializerForClass(cls);
 
         String affFieldName = affinityFieldName(cls);
 
@@ -549,11 +699,10 @@ public class BinaryContext implements Externalizable {
             typeId,
             typeName,
             affFieldName,
-            idMapper,
-            null,
+            mapper,
+            serializer,
             true,
-            registered,
-            false /* predefined */
+            registered
         );
 
         if (!deserialize) {
@@ -563,16 +712,76 @@ public class BinaryContext implements Externalizable {
                 new BinaryMetadata(typeId, typeName, desc.fieldsMeta(), affFieldName, schemas, desc.isEnum()).wrap(this));
         }
 
-        // perform put() instead of putIfAbsent() because "registered" flag might have been changed or class loader
-        // might have reloaded described class.
-        if (IgniteUtils.detectClassLoader(cls).equals(dfltLdr))
-            userTypes.put(typeId, desc);
-
         descByCls.put(cls, desc);
 
-        mappers.putIfAbsent(typeId, idMapper);
+        typeId2Mapper.putIfAbsent(typeId, mapper);
 
         return desc;
+    }
+
+    /**
+     * Creates and registers {@link BinaryClassDescriptor} for the given user {@code class}.
+     *
+     * @param desc Old descriptor that should be re-registered.
+     * @return Class descriptor.
+     */
+    private BinaryClassDescriptor registerUserClassDescriptor(BinaryClassDescriptor desc) {
+        boolean registered;
+
+        try {
+            registered = marshCtx.registerClass(desc.typeId(), desc.describedClass());
+        }
+        catch (IgniteCheckedException e) {
+            throw new BinaryObjectException("Failed to register class.", e);
+        }
+
+        if (registered) {
+            BinarySerializer serializer = desc.initialSerializer();
+
+            if (serializer == null)
+                serializer = serializerForClass(desc.describedClass());
+
+            desc = new BinaryClassDescriptor(
+                this,
+                desc.describedClass(),
+                true,
+                desc.typeId(),
+                desc.typeName(),
+                desc.affFieldKeyName(),
+                desc.mapper(),
+                serializer,
+                true,
+                true
+            );
+
+            descByCls.put(desc.describedClass(), desc);
+        }
+
+        return desc;
+    }
+
+    /**
+     * Get serializer for class taking in count default one.
+     *
+     * @param cls Class.
+     * @return Serializer for class or {@code null} if none exists.
+     */
+    private @Nullable BinarySerializer serializerForClass(Class cls) {
+        BinarySerializer serializer = defaultSerializer();
+
+        if (serializer == null && canUseReflectiveSerializer(cls))
+            serializer = new BinaryReflectiveSerializer();
+
+        return serializer;
+    }
+
+    /**
+     * @return Default serializer.
+     */
+    private BinarySerializer defaultSerializer() {
+        BinaryConfiguration binCfg = igniteCfg.getBinaryConfiguration();
+
+        return binCfg != null ? binCfg.getSerializer() : null;
     }
 
     /**
@@ -607,9 +816,7 @@ public class BinaryContext implements Externalizable {
      * @return Type ID.
      */
     public int typeId(String typeName) {
-        String typeName0 = typeName(typeName);
-
-        Integer id = predefinedTypeNames.get(typeName0);
+        Integer id = predefinedTypeNames.get(SIMPLE_NAME_LOWER_CASE_MAPPER.typeName(typeName));
 
         if (id != null)
             return id;
@@ -617,7 +824,9 @@ public class BinaryContext implements Externalizable {
         if (marshCtx.isSystemType(typeName))
             return typeName.hashCode();
 
-        return userTypeIdMapper(typeName0).typeId(typeName0);
+        BinaryInternalMapper mapper = userTypeMapper(typeName);
+
+        return mapper.typeId(typeName);
     }
 
     /**
@@ -626,27 +835,107 @@ public class BinaryContext implements Externalizable {
      * @return Field ID.
      */
     public int fieldId(int typeId, String fieldName) {
-        return userTypeIdMapper(typeId).fieldId(typeId, fieldName);
+        BinaryInternalMapper mapper = userTypeMapper(typeId);
+
+        return mapper.fieldId(typeId, fieldName);
     }
 
     /**
      * @param typeId Type ID.
      * @return Instance of ID mapper.
      */
-    public BinaryIdMapper userTypeIdMapper(int typeId) {
-        BinaryIdMapper idMapper = mappers.get(typeId);
+    public BinaryInternalMapper userTypeMapper(int typeId) {
+        BinaryInternalMapper mapper = typeId2Mapper.get(typeId);
 
-        return idMapper != null ? idMapper : BinaryInternalIdMapper.defaultInstance();
+        return mapper != null ? mapper : SIMPLE_NAME_LOWER_CASE_MAPPER;
     }
 
     /**
-     * @param typeName Type name.
+     * @param clsName Type name.
      * @return Instance of ID mapper.
      */
-    private BinaryIdMapper userTypeIdMapper(String typeName) {
-        BinaryIdMapper idMapper = typeMappers.get(typeName);
+    private BinaryInternalMapper userTypeMapper(String clsName) {
+        BinaryInternalMapper mapper = cls2Mappers.get(clsName);
 
-        return idMapper != null ? idMapper : BinaryInternalIdMapper.defaultInstance();
+        if (mapper != null)
+            return mapper;
+
+        mapper = resolveMapper(clsName, igniteCfg.getBinaryConfiguration());
+
+        BinaryInternalMapper prevMap = cls2Mappers.putIfAbsent(clsName, mapper);
+
+        if (prevMap != null && !mapper.equals(prevMap))
+            throw new IgniteException("Different mappers [clsName=" + clsName + ", newMapper=" + mapper
+                + ", prevMap=" + prevMap + "]");
+
+        prevMap = typeId2Mapper.putIfAbsent(mapper.typeId(clsName), mapper);
+
+        if (prevMap != null && !mapper.equals(prevMap))
+            throw new IgniteException("Different mappers [clsName=" + clsName + ", newMapper=" + mapper
+                + ", prevMap=" + prevMap + "]");
+
+        return mapper;
+    }
+
+    /**
+     * @param clsName Type name.
+     * @param cfg Binary configuration.
+     * @return Mapper according to configuration.
+     */
+    private static BinaryInternalMapper resolveMapper(String clsName, BinaryConfiguration cfg) {
+        assert clsName != null;
+
+        if (cfg == null)
+            return DFLT_MAPPER;
+
+        BinaryIdMapper globalIdMapper = cfg.getIdMapper();
+        BinaryNameMapper globalNameMapper = cfg.getNameMapper();
+
+        Collection<BinaryTypeConfiguration> typeCfgs = cfg.getTypeConfigurations();
+
+        if (typeCfgs != null) {
+            for (BinaryTypeConfiguration typeCfg : typeCfgs) {
+                String typeCfgName = typeCfg.getTypeName();
+
+                // Pattern.
+                if (typeCfgName != null && typeCfgName.endsWith(".*")) {
+                    String pkgName = typeCfgName.substring(0, typeCfgName.length() - 2);
+
+                    int dotIndex = clsName.lastIndexOf('.');
+
+                    if (dotIndex > 0) {
+                        String typePkgName = clsName.substring(0, dotIndex);
+
+                        if (pkgName.equals(typePkgName)) {
+                            // Resolve mapper.
+                            BinaryIdMapper idMapper = globalIdMapper;
+
+                            if (typeCfg.getIdMapper() != null)
+                                idMapper = typeCfg.getIdMapper();
+
+                            BinaryNameMapper nameMapper = globalNameMapper;
+
+                            if (typeCfg.getNameMapper() != null)
+                                nameMapper = typeCfg.getNameMapper();
+
+                            return resolveMapper(nameMapper, idMapper);
+                        }
+                    }
+                }
+            }
+        }
+
+        return resolveMapper(globalNameMapper, globalIdMapper);
+    }
+
+    /**
+     * @param clsName Class name.
+     * @return Type name.
+     */
+    public String userTypeName(String clsName) {
+        BinaryInternalMapper mapper = userTypeMapper(clsName);
+
+        return mapper.typeName(clsName);
     }
 
     /**
@@ -664,32 +953,13 @@ public class BinaryContext implements Externalizable {
         return null;
     }
 
-    /** {@inheritDoc} */
-    @Override public void writeExternal(ObjectOutput out) throws IOException {
-        U.writeString(out, igniteCfg.getGridName());
-    }
-
-    /** {@inheritDoc} */
-    @Override public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
-        gridName = U.readString(in);
-    }
-
     /**
-     * @return Binary context.
-     * @throws ObjectStreamException In case of error.
+     * @param cls Class.
+     * @param id Type ID.
+     * @return GridBinaryClassDescriptor.
      */
-    protected Object readResolve() throws ObjectStreamException {
-        try {
-            IgniteKernal g = IgnitionEx.gridx(gridName);
-
-            if (g == null)
-                throw new IllegalStateException("Failed to find grid for name: " + gridName);
-
-            return ((CacheObjectBinaryProcessorImpl)g.context().cacheObjects()).binaryContext();
-        }
-        catch (IllegalStateException e) {
-            throw U.withCause(new InvalidObjectException(e.getMessage()), e);
-        }
+    public BinaryClassDescriptor registerPredefinedType(Class<?> cls, int id) {
+        return registerPredefinedType(cls, id, null);
     }
 
     /**
@@ -697,34 +967,39 @@ public class BinaryContext implements Externalizable {
      * @param id Type ID.
      * @return GridBinaryClassDescriptor.
      */
-    public BinaryClassDescriptor registerPredefinedType(Class<?> cls, int id) {
-        String typeName = typeName(cls.getName());
+    public BinaryClassDescriptor registerPredefinedType(Class<?> cls, int id, String affFieldName) {
+        String simpleClsName = SIMPLE_NAME_LOWER_CASE_MAPPER.typeName(cls.getName());
+
+        if (id == 0)
+            id = SIMPLE_NAME_LOWER_CASE_MAPPER.typeId(simpleClsName);
 
         BinaryClassDescriptor desc = new BinaryClassDescriptor(
             this,
             cls,
             false,
             id,
-            typeName,
-            null,
-            BinaryInternalIdMapper.defaultInstance(),
-            null,
+            simpleClsName,
+            affFieldName,
+            SIMPLE_NAME_LOWER_CASE_MAPPER,
+            new BinaryReflectiveSerializer(),
             false,
-            true, /* registered */
-            true /* predefined */
+            true /* registered */
         );
 
-        predefinedTypeNames.put(typeName, id);
+        predefinedTypeNames.put(simpleClsName, id);
         predefinedTypes.put(id, desc);
 
         descByCls.put(cls, desc);
+
+        if (affFieldName != null)
+            affKeyFieldNames.putIfAbsent(id, affFieldName);
 
         return desc;
     }
 
     /**
      * @param clsName Class name.
-     * @param idMapper ID mapper.
+     * @param mapper ID mapper.
      * @param serializer Serializer.
      * @param affKeyFieldName Affinity key field name.
      * @param isEnum If enum.
@@ -732,31 +1007,31 @@ public class BinaryContext implements Externalizable {
      */
     @SuppressWarnings("ErrorNotRethrown")
     public void registerUserType(String clsName,
-        BinaryIdMapper idMapper,
+        BinaryInternalMapper mapper,
         @Nullable BinarySerializer serializer,
         @Nullable String affKeyFieldName,
         boolean isEnum)
         throws BinaryObjectException {
-        assert idMapper != null;
+        assert mapper != null;
 
         Class<?> cls = null;
 
         try {
-            cls = Class.forName(clsName);
+            cls = U.resolveClassLoader(configuration()).loadClass(clsName);
         }
         catch (ClassNotFoundException | NoClassDefFoundError ignored) {
             // No-op.
         }
 
-        String typeName = typeName(clsName);
+        String typeName = mapper.typeName(clsName);
 
-        int id = idMapper.typeId(typeName);
+        int id = mapper.typeId(clsName);
 
         //Workaround for IGNITE-1358
         if (predefinedTypes.get(id) != null)
             throw new BinaryObjectException("Duplicate type ID [clsName=" + clsName + ", id=" + id + ']');
 
-        if (mappers.put(id, idMapper) != null)
+        if (typeId2Mapper.put(id, mapper) != null)
             throw new BinaryObjectException("Duplicate type ID [clsName=" + clsName + ", id=" + id + ']');
 
         if (affKeyFieldName != null) {
@@ -764,12 +1039,20 @@ public class BinaryContext implements Externalizable {
                 throw new BinaryObjectException("Duplicate type ID [clsName=" + clsName + ", id=" + id + ']');
         }
 
-        typeMappers.put(typeName, idMapper);
+        cls2Mappers.put(clsName, mapper);
 
         Map<String, Integer> fieldsMeta = null;
         Collection<BinarySchema> schemas = null;
 
         if (cls != null) {
+            if (serializer == null) {
+                // At this point we must decide whether to rely on Java serialization mechanics or not.
+                // If no serializer is provided, we examine the class and if it doesn't contain non-trivial
+                // serialization logic we are safe to fallback to reflective binary serialization.
+                if (canUseReflectiveSerializer(cls))
+                    serializer = new BinaryReflectiveSerializer();
+            }
+
             BinaryClassDescriptor desc = new BinaryClassDescriptor(
                 this,
                 cls,
@@ -777,23 +1060,29 @@ public class BinaryContext implements Externalizable {
                 id,
                 typeName,
                 affKeyFieldName,
-                idMapper,
+                mapper,
                 serializer,
                 true,
-                true, /* registered */
-                false /* predefined */
+                false
             );
 
             fieldsMeta = desc.fieldsMeta();
             schemas = desc.schema() != null ? Collections.singleton(desc.schema()) : null;
 
-            if (IgniteUtils.detectClassLoader(cls).equals(dfltLdr))
-                userTypes.put(id, desc);
-
             descByCls.put(cls, desc);
         }
 
         metaHnd.addMeta(id, new BinaryMetadata(id, typeName, fieldsMeta, affKeyFieldName, schemas, isEnum).wrap(this));
+    }
+
+    /**
+     * Check whether reflective serializer can be used for class.
+     *
+     * @param cls Class.
+     * @return {@code True} if reflective serializer can be used.
+     */
+    private static boolean canUseReflectiveSerializer(Class cls) {
+        return BinaryUtils.isBinarylizable(cls) || !BinaryUtils.isCustomJavaSerialization(cls);
     }
 
     /**
@@ -806,7 +1095,9 @@ public class BinaryContext implements Externalizable {
     public BinaryFieldImpl createField(int typeId, String fieldName) {
         BinarySchemaRegistry schemaReg = schemaRegistry(typeId);
 
-        int fieldId = userTypeIdMapper(typeId).fieldId(typeId, fieldName);
+        BinaryInternalMapper mapper = userTypeMapper(typeId);
+
+        int fieldId = mapper.fieldId(typeId, fieldName);
 
         return new BinaryFieldImpl(typeId, schemaReg, fieldName, fieldId);
     }
@@ -902,43 +1193,6 @@ public class BinaryContext implements Externalizable {
     }
 
     /**
-     * @param clsName Class name.
-     * @return Type name.
-     */
-    @SuppressWarnings("ResultOfMethodCallIgnored")
-    public static String typeName(String clsName) {
-        assert clsName != null;
-
-        int idx = clsName.lastIndexOf('$');
-
-        if (idx == clsName.length() - 1)
-            // This is a regular (not inner) class name that ends with '$'. Common use case for Scala classes.
-            idx = -1;
-        else if (idx >= 0) {
-            String typeName = clsName.substring(idx + 1);
-
-            try {
-                Integer.parseInt(typeName);
-
-                // This is an anonymous class. Don't cut off enclosing class name for it.
-                idx = -1;
-            }
-            catch (NumberFormatException ignore) {
-                // This is a lambda class.
-                if (clsName.indexOf("$$Lambda$") > 0)
-                    idx = -1;
-                else
-                    return typeName;
-            }
-        }
-
-        if (idx < 0)
-            idx = clsName.lastIndexOf('.');
-
-        return idx >= 0 ? clsName.substring(idx + 1) : clsName;
-    }
-
-    /**
      * Undeployment callback invoked when class loader is being undeployed.
      *
      * Some marshallers may want to clean their internal state that uses the undeployed class loader somehow.
@@ -965,7 +1219,7 @@ public class BinaryContext implements Externalizable {
          * Add type descriptor.
          *
          * @param clsName Class name.
-         * @param idMapper ID mapper.
+         * @param mapper Mapper.
          * @param serializer Serializer.
          * @param affKeyFieldName Affinity key field name.
          * @param isEnum Enum flag.
@@ -973,14 +1227,14 @@ public class BinaryContext implements Externalizable {
          * @throws BinaryObjectException If failed.
          */
         private void add(String clsName,
-            BinaryIdMapper idMapper,
+            BinaryInternalMapper mapper,
             BinarySerializer serializer,
             String affKeyFieldName,
             boolean isEnum,
             boolean canOverride)
             throws BinaryObjectException {
             TypeDescriptor desc = new TypeDescriptor(clsName,
-                idMapper,
+                mapper,
                 serializer,
                 affKeyFieldName,
                 isEnum,
@@ -1011,8 +1265,8 @@ public class BinaryContext implements Externalizable {
         /** Class name. */
         private final String clsName;
 
-        /** ID mapper. */
-        private BinaryIdMapper idMapper;
+        /** Mapper. */
+        private BinaryInternalMapper mapper;
 
         /** Serializer. */
         private BinarySerializer serializer;
@@ -1030,16 +1284,16 @@ public class BinaryContext implements Externalizable {
          * Constructor.
          *
          * @param clsName Class name.
-         * @param idMapper ID mapper.
+         * @param mapper ID mapper.
          * @param serializer Serializer.
          * @param affKeyFieldName Affinity key field name.
          * @param isEnum Enum type.
          * @param canOverride Whether this descriptor can be override.
          */
-        private TypeDescriptor(String clsName, BinaryIdMapper idMapper, BinarySerializer serializer,
-            String affKeyFieldName, boolean isEnum, boolean canOverride) {
+        private TypeDescriptor(String clsName, BinaryInternalMapper mapper,
+            BinarySerializer serializer, String affKeyFieldName, boolean isEnum, boolean canOverride) {
             this.clsName = clsName;
-            this.idMapper = idMapper;
+            this.mapper = mapper;
             this.serializer = serializer;
             this.affKeyFieldName = affKeyFieldName;
             this.isEnum = isEnum;
@@ -1056,9 +1310,10 @@ public class BinaryContext implements Externalizable {
             assert clsName.equals(other.clsName);
 
             if (canOverride) {
-                idMapper = other.idMapper;
+                mapper = other.mapper;
                 serializer = other.serializer;
                 affKeyFieldName = other.affKeyFieldName;
+                isEnum = other.isEnum;
                 canOverride = other.canOverride;
             }
             else if (!other.canOverride)

@@ -26,6 +26,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -53,9 +54,13 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import junit.framework.Assert;
 import org.apache.ignite.IgniteCheckedException;
+import org.apache.ignite.binary.BinaryBasicIdMapper;
+import org.apache.ignite.binary.BinaryBasicNameMapper;
 import org.apache.ignite.binary.BinaryCollectionFactory;
+import org.apache.ignite.binary.BinaryField;
 import org.apache.ignite.binary.BinaryIdMapper;
 import org.apache.ignite.binary.BinaryMapFactory;
+import org.apache.ignite.binary.BinaryNameMapper;
 import org.apache.ignite.binary.BinaryObject;
 import org.apache.ignite.binary.BinaryObjectBuilder;
 import org.apache.ignite.binary.BinaryObjectException;
@@ -63,6 +68,7 @@ import org.apache.ignite.binary.BinaryRawReader;
 import org.apache.ignite.binary.BinaryRawWriter;
 import org.apache.ignite.binary.BinaryReader;
 import org.apache.ignite.binary.BinarySerializer;
+import org.apache.ignite.binary.BinaryType;
 import org.apache.ignite.binary.BinaryTypeConfiguration;
 import org.apache.ignite.binary.BinaryWriter;
 import org.apache.ignite.binary.Binarylizable;
@@ -76,29 +82,26 @@ import org.apache.ignite.internal.util.lang.GridMapEntry;
 import org.apache.ignite.internal.util.typedef.F;
 import org.apache.ignite.internal.util.typedef.internal.S;
 import org.apache.ignite.internal.util.typedef.internal.U;
+import org.apache.ignite.logger.NullLogger;
 import org.apache.ignite.marshaller.MarshallerContextTestImpl;
 import org.apache.ignite.testframework.GridTestUtils;
 import org.apache.ignite.testframework.junits.common.GridCommonAbstractTest;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.jsr166.ConcurrentHashMap8;
-import sun.misc.Unsafe;
 
+import static org.apache.ignite.IgniteSystemProperties.IGNITE_BINARY_MARSHALLER_USE_STRING_SERIALIZATION_VER_2;
 import static org.apache.ignite.internal.binary.streams.BinaryMemoryAllocator.INSTANCE;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertNotEquals;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * Binary marshaller tests.
  */
 @SuppressWarnings({"OverlyStrongTypeCast", "ArrayHashCode", "ConstantConditions"})
 public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
-    /** */
-    private static final Unsafe UNSAFE = GridUnsafe.unsafe();
-
-    /** */
-    protected static final long BYTE_ARR_OFF = UNSAFE.arrayBaseOffset(byte[].class);
-
     /**
      * @throws Exception If failed.
      */
@@ -110,7 +113,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
      * @throws Exception If failed.
      */
     public void testByte() throws Exception {
-        assertEquals((byte) 100, marshalUnmarshal((byte)100).byteValue());
+        assertEquals((byte)100, marshalUnmarshal((byte)100).byteValue());
     }
 
     /**
@@ -180,8 +183,69 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     /**
      * @throws Exception If failed.
      */
-    public void testString() throws Exception {
-        assertEquals("str", marshalUnmarshal("str"));
+    public void testStringVer1() throws Exception {
+        doTestString(false);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testStringVer2() throws Exception {
+        doTestString(true);
+    }
+
+    /**
+     * @throws Exception If failed
+     */
+    private void doTestString(boolean ver2) throws Exception {
+        // Ascii check.
+        String str = "ascii0123456789";
+        assertEquals(str, marshalUnmarshal(str));
+
+        byte[] bytes = str.getBytes(UTF_8);
+        assertEquals(str, BinaryUtils.utf8BytesToStr(bytes, 0, bytes.length));
+
+        bytes = BinaryUtils.strToUtf8Bytes(str);
+        assertEquals(str, new String(bytes, UTF_8));
+
+        // Extended symbols set check set.
+        str = "的的abcdкириллица";
+        assertEquals(str, marshalUnmarshal(str));
+
+        bytes = str.getBytes(UTF_8);
+        assertEquals(str, BinaryUtils.utf8BytesToStr(bytes, 0, bytes.length));
+
+        bytes = BinaryUtils.strToUtf8Bytes(str);
+        assertEquals(str, new String(bytes, UTF_8));
+
+        // Special symbols check.
+        str = new String(new char[] {0xD800, '的', 0xD800, 0xD800, 0xDC00, 0xDFFF});
+        if (ver2) {
+            bytes = BinaryUtils.strToUtf8Bytes(str);
+            assertEquals(str, BinaryUtils.utf8BytesToStr(bytes, 0, bytes.length));
+        }
+        else
+            assertNotEquals(str, marshalUnmarshal(str));
+
+        str = new String(new char[] {55296});
+        if (ver2) {
+            bytes = BinaryUtils.strToUtf8Bytes(str);
+            assertEquals(str, BinaryUtils.utf8BytesToStr(bytes, 0, bytes.length));
+        }
+        else
+            assertNotEquals(str, marshalUnmarshal(str));
+
+        bytes = str.getBytes(UTF_8);
+        assertNotEquals(str, new String(bytes, UTF_8));
+
+        bytes = str.getBytes(UTF_8);
+        assertNotEquals(str, BinaryUtils.utf8BytesToStr(bytes, 0, bytes.length));
+
+        str = new String(new char[] {0xD801, 0xDC37});
+        assertEquals(str, marshalUnmarshal(str));
+
+        bytes = str.getBytes(UTF_8);
+        assertEquals(str, new String(bytes, UTF_8));
     }
 
     /**
@@ -292,7 +356,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
      * @throws Exception If failed.
      */
     public void testDecimalArray() throws Exception {
-        BigDecimal[] arr = new BigDecimal[] {BigDecimal.ZERO, BigDecimal.ONE, BigDecimal.TEN} ;
+        BigDecimal[] arr = new BigDecimal[] {BigDecimal.ZERO, BigDecimal.ONE, BigDecimal.TEN};
 
         assertArrayEquals(arr, marshalUnmarshal(arr));
     }
@@ -398,7 +462,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         CustomCollections cc = new CustomCollections();
 
         cc.list.add(1);
-        cc.customList.add(2);
+        cc.customList.add(new Value(1));
 
         CustomCollections copiedCc = marshalUnmarshal(cc);
 
@@ -409,6 +473,28 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         assertEquals(cc.list.get(0), copiedCc.list.get(0));
         assertEquals(cc.customList.get(0), copiedCc.customList.get(0));
+    }
+
+    /**
+     * Test serialization of custom collections.
+     *
+     * @throws Exception If failed.
+     */
+    @SuppressWarnings("unchecked")
+    public void testCustomCollections2() throws Exception {
+        CustomArrayList arrList = new CustomArrayList();
+
+        arrList.add(1);
+
+        Object cp = marshalUnmarshal(arrList);
+
+        assert cp.getClass().equals(CustomArrayList.class);
+
+        CustomArrayList customCp = (CustomArrayList)cp;
+
+        assertEquals(customCp.size(), arrList.size());
+
+        assertEquals(customCp.get(0), arrList.get(0));
     }
 
     /**
@@ -430,23 +516,6 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         assertEquals(cc.list.get(0), copiedCc.list.get(0));
         assertEquals(cc.map.get(new DummyHolder(2)), copiedCc.map.get(new DummyHolder(2)));
-    }
-
-    /**
-     * @throws Exception If failed.
-     */
-    public void testExternalizableHashCode() throws Exception {
-        SimpleExternalizable sim1 = new SimpleExternalizable("Simple");
-        SimpleExternalizable sim2 = new SimpleExternalizable("Simple");
-
-        BinaryMarshaller marsh = binaryMarshaller();
-
-        BinaryObjectImpl sim1Binary = marshal(sim1, marsh);
-        BinaryObjectImpl sim2Binary = marshal(sim2, marsh);
-
-        assertEquals(sim1.hashCode(), sim2.hashCode());
-        assertEquals(sim1.hashCode(), sim1Binary.hashCode());
-        assertEquals(sim2.hashCode(), sim2Binary.hashCode());
     }
 
     /**
@@ -764,6 +833,21 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     }
 
     /**
+     * @throws Exception If failed.
+     */
+    public void testVoid() throws Exception {
+        Class clazz = Void.class;
+
+        assertEquals(clazz, marshalUnmarshal(clazz));
+
+        clazz = Void.TYPE;
+
+        assertEquals(clazz, marshalUnmarshal(clazz));
+    }
+
+
+
+    /**
      *
      */
     private static class EnclosingObj implements Serializable {
@@ -795,6 +879,13 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     private static class TestQueue extends AbstractQueue<Integer> implements Externalizable {
         /** Name. */
         private String name;
+
+        /**
+         * {@link Externalizable} support.
+         */
+        public TestQueue() {
+            // No-op.
+        }
 
         /**
          * @param name Name.
@@ -901,9 +992,9 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
      */
     public void testClassWithoutPublicConstructor() throws Exception {
         BinaryMarshaller marsh = binaryMarshaller(Arrays.asList(
-                new BinaryTypeConfiguration(NoPublicConstructor.class.getName()),
-                new BinaryTypeConfiguration(NoPublicDefaultConstructor.class.getName()),
-                new BinaryTypeConfiguration(ProtectedConstructor.class.getName()))
+            new BinaryTypeConfiguration(NoPublicConstructor.class.getName()),
+            new BinaryTypeConfiguration(NoPublicDefaultConstructor.class.getName()),
+            new BinaryTypeConfiguration(ProtectedConstructor.class.getName()))
         );
 
         NoPublicConstructor npc = new NoPublicConstructor();
@@ -1023,8 +1114,10 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
             @Override public int fieldId(int typeId, String fieldName) {
                 assert typeId == 44444;
 
-                if ("val1".equals(fieldName)) return 55555;
-                else if ("val2".equals(fieldName)) return 66666;
+                if ("val1".equals(fieldName))
+                    return 55555;
+                else if ("val2".equals(fieldName))
+                    return 66666;
 
                 assert false : "Unknown field: " + fieldName;
 
@@ -1032,7 +1125,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
             }
         });
 
-        BinaryMarshaller marsh = binaryMarshaller(new BinaryIdMapper() {
+        BinaryMarshaller marsh = binaryMarshaller(null, new BinaryIdMapper() {
             @Override public int typeId(String clsName) {
                 return 11111;
             }
@@ -1061,6 +1154,63 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         assertEquals(10, po1.<CustomMappedObject1>deserialize().val1);
         assertEquals("str1", po1.<CustomMappedObject1>deserialize().val2);
+
+        CustomMappedObject2 obj2 = new CustomMappedObject2(20, "str2");
+
+        BinaryObjectExImpl po2 = marshal(obj2, marsh);
+
+        assertEquals(44444, po2.type().typeId());
+        assertEquals((Integer)20, po2.field(55555));
+        assertEquals("str2", po2.field(66666));
+
+        assertEquals(20, po2.<CustomMappedObject2>deserialize().val1);
+        assertEquals("str2", po2.<CustomMappedObject2>deserialize().val2);
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testSimpleNameLowerCaseMappers() throws Exception {
+        BinaryTypeConfiguration innerClassType = new BinaryTypeConfiguration(InnerMappedObject.class.getName());
+        BinaryTypeConfiguration publicClassType = new BinaryTypeConfiguration(TestMappedObject.class.getName());
+        BinaryTypeConfiguration typeWithCustomMapper = new BinaryTypeConfiguration(CustomMappedObject2.class.getName());
+
+        typeWithCustomMapper.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 44444;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                assert typeId == 44444;
+
+                if ("val1".equals(fieldName))
+                    return 55555;
+                else if ("val2".equals(fieldName))
+                    return 66666;
+
+                assert false : "Unknown field: " + fieldName;
+
+                return 0;
+            }
+        });
+
+        BinaryMarshaller marsh = binaryMarshaller(new BinaryBasicNameMapper(true), new BinaryBasicIdMapper(true),
+            Arrays.asList(innerClassType, publicClassType, typeWithCustomMapper));
+
+        InnerMappedObject innerObj = new InnerMappedObject(10, "str1");
+
+        BinaryObjectExImpl innerBo = marshal(innerObj, marsh);
+
+        assertEquals("InnerMappedObject".toLowerCase().hashCode(), innerBo.type().typeId());
+
+        assertEquals(10, innerBo.<CustomMappedObject1>deserialize().val1);
+        assertEquals("str1", innerBo.<CustomMappedObject1>deserialize().val2);
+
+        TestMappedObject publicObj = new TestMappedObject();
+
+        BinaryObjectExImpl publicBo = marshal(publicObj, marsh);
+
+        assertEquals("TestMappedObject".toLowerCase().hashCode(), publicBo.type().typeId());
 
         CustomMappedObject2 obj2 = new CustomMappedObject2(20, "str2");
 
@@ -1284,7 +1434,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     /**
      * @throws Exception If failed.
      */
-    public void testTypeNames() throws Exception {
+    public void testTypeNamesSimpleNameMapper() throws Exception {
         BinaryTypeConfiguration customType1 = new BinaryTypeConfiguration(Value.class.getName());
 
         customType1.setIdMapper(new BinaryIdMapper() {
@@ -1321,7 +1471,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
             }
         });
 
-        BinaryTypeConfiguration customType4 = new BinaryTypeConfiguration("NonExistentClass5");
+        BinaryTypeConfiguration customType4 = new BinaryTypeConfiguration("NonExistentClass0");
 
         customType4.setIdMapper(new BinaryIdMapper() {
             @Override public int typeId(String clsName) {
@@ -1333,26 +1483,309 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
             }
         });
 
-        BinaryMarshaller marsh = binaryMarshaller(Arrays.asList(
+        BinaryMarshaller marsh = binaryMarshaller(new BinaryBasicNameMapper(true), new BinaryBasicIdMapper(true),
+            Arrays.asList(
+                new BinaryTypeConfiguration(Key.class.getName()),
+                new BinaryTypeConfiguration("org.gridgain.NonExistentClass3"),
+                new BinaryTypeConfiguration("NonExistentClass4"),
+                customType1,
+                customType2,
+                customType3,
+                customType4
+            ));
+
+        BinaryContext ctx = binaryContext(marsh);
+
+        // Full name hashCode.
+        assertEquals("notconfiguredclass".hashCode(), ctx.typeId("NotConfiguredClass"));
+        assertEquals("key".hashCode(), ctx.typeId(Key.class.getName()));
+        assertEquals("nonexistentclass3".hashCode(), ctx.typeId("org.gridgain.NonExistentClass3"));
+        assertEquals("nonexistentclass4".hashCode(), ctx.typeId("NonExistentClass4"));
+        assertEquals(300, ctx.typeId(Value.class.getName()));
+        assertEquals(400, ctx.typeId("org.gridgain.NonExistentClass1"));
+        assertEquals(500, ctx.typeId("NonExistentClass2"));
+
+        // BinaryIdMapper.typeId() contract.
+        assertEquals("nonexistentclass0".hashCode(), ctx.typeId("NonExistentClass0"));
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testTypeNamesFullNameMappers() throws Exception {
+        BinaryTypeConfiguration customType1 = new BinaryTypeConfiguration(Value.class.getName());
+
+        customType1.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 300;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType2 = new BinaryTypeConfiguration("org.gridgain.NonExistentClass1");
+
+        customType2.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 400;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType3 = new BinaryTypeConfiguration("NonExistentClass2");
+
+        customType3.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 500;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType4 = new BinaryTypeConfiguration("NonExistentClass0");
+
+        customType4.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 0;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryMarshaller marsh = binaryMarshaller(new BinaryBasicNameMapper(false), new BinaryBasicIdMapper(false),
+            Arrays.asList(
+                new BinaryTypeConfiguration(Key.class.getName()),
+                new BinaryTypeConfiguration("org.gridgain.NonExistentClass3"),
+                new BinaryTypeConfiguration("NonExistentClass4"),
+                customType1,
+                customType2,
+                customType3,
+                customType4
+            ));
+
+        BinaryContext ctx = binaryContext(marsh);
+
+        // Full name hashCode.
+        assertEquals("NotConfiguredClass".hashCode(), ctx.typeId("NotConfiguredClass"));
+        assertEquals(Key.class.getName().hashCode(), ctx.typeId(Key.class.getName()));
+        assertEquals("org.gridgain.NonExistentClass3".hashCode(), ctx.typeId("org.gridgain.NonExistentClass3"));
+        assertEquals("NonExistentClass4".hashCode(), ctx.typeId("NonExistentClass4"));
+        assertEquals(300, ctx.typeId(Value.class.getName()));
+        assertEquals(400, ctx.typeId("org.gridgain.NonExistentClass1"));
+        assertEquals(500, ctx.typeId("NonExistentClass2"));
+
+        // BinaryIdMapper.typeId() contract.
+        assertEquals("nonexistentclass0".hashCode(), ctx.typeId("NonExistentClass0"));
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testTypeNamesSimpleNameMappers() throws Exception {
+        BinaryTypeConfiguration customType1 = new BinaryTypeConfiguration(Value.class.getName());
+
+        customType1.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 300;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType2 = new BinaryTypeConfiguration("org.gridgain.NonExistentClass1");
+
+        customType2.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 400;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType3 = new BinaryTypeConfiguration("NonExistentClass2");
+
+        customType3.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 500;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType4 = new BinaryTypeConfiguration("NonExistentClass0");
+
+        customType4.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 0;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType5 = new BinaryTypeConfiguration(DateClass1.class.getName());
+
+        customType5.setNameMapper(new BinaryBasicNameMapper(false));
+        customType5.setIdMapper(new BinaryBasicIdMapper(false));
+
+        BinaryMarshaller marsh = binaryMarshaller(new BinaryBasicNameMapper(true), new BinaryBasicIdMapper(true),
+            Arrays.asList(
+                new BinaryTypeConfiguration(Key.class.getName()),
+                new BinaryTypeConfiguration("org.gridgain.NonExistentClass3"),
+                new BinaryTypeConfiguration("NonExistentClass4"),
+                customType1,
+                customType2,
+                customType3,
+                customType4,
+                customType5
+            ));
+
+        BinaryContext ctx = binaryContext(marsh);
+
+        assertEquals("notconfiguredclass".hashCode(), ctx.typeId("NotConfiguredClass"));
+        assertEquals("notconfiguredclass".hashCode(), ctx.typeId("org.blabla.NotConfiguredClass"));
+        assertEquals("key".hashCode(), ctx.typeId(Key.class.getName()));
+        assertEquals("nonexistentclass3".hashCode(), ctx.typeId("org.gridgain.NonExistentClass3"));
+        assertEquals("nonexistentclass4".hashCode(), ctx.typeId("NonExistentClass4"));
+
+        assertEquals(300, ctx.typeId(Value.class.getName()));
+        assertEquals(400, ctx.typeId("org.gridgain.NonExistentClass1"));
+        assertEquals(500, ctx.typeId("NonExistentClass2"));
+
+        assertEquals(DateClass1.class.getName().hashCode(), ctx.typeId(DateClass1.class.getName()));
+
+        // BinaryIdMapper.typeId() contract.
+        assertEquals("nonexistentclass0".hashCode(), ctx.typeId("NonExistentClass0"));
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testTypeNamesCustomIdMapper() throws Exception {
+        BinaryTypeConfiguration customType1 = new BinaryTypeConfiguration(Value.class.getName());
+
+        customType1.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 300;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType2 = new BinaryTypeConfiguration("org.gridgain.NonExistentClass1");
+
+        customType2.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 400;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType3 = new BinaryTypeConfiguration("NonExistentClass2");
+
+        customType3.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 500;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType4 = new BinaryTypeConfiguration("NonExistentClass0");
+
+        customType4.setIdMapper(new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                return 0;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        });
+
+        BinaryTypeConfiguration customType5 = new BinaryTypeConfiguration(DateClass1.class.getName());
+
+        customType5.setIdMapper(new BinaryBasicIdMapper(false));
+
+        BinaryTypeConfiguration customType6 = new BinaryTypeConfiguration(MyTestClass.class.getName());
+
+        customType6.setIdMapper(new BinaryBasicIdMapper(true));
+        customType6.setNameMapper(new BinaryBasicNameMapper(true));
+
+        BinaryMarshaller marsh = binaryMarshaller(new BinaryBasicNameMapper(false), new BinaryIdMapper() {
+            @Override public int typeId(String clsName) {
+                if ("org.blabla.NotConfiguredSpecialClass".equals(clsName))
+                    return 0;
+                else if (Key.class.getName().equals(clsName))
+                    return 991;
+                else if ("org.gridgain.NonExistentClass3".equals(clsName))
+                    return 992;
+                else if ("NonExistentClass4".equals(clsName))
+                    return 993;
+
+                return 999;
+            }
+
+            @Override public int fieldId(int typeId, String fieldName) {
+                return 0;
+            }
+        }, Arrays.asList(
             new BinaryTypeConfiguration(Key.class.getName()),
             new BinaryTypeConfiguration("org.gridgain.NonExistentClass3"),
             new BinaryTypeConfiguration("NonExistentClass4"),
             customType1,
             customType2,
             customType3,
-            customType4
+            customType4,
+            customType5,
+            customType6
         ));
 
         BinaryContext ctx = binaryContext(marsh);
 
-        assertEquals("notconfiguredclass".hashCode(), ctx.typeId("NotConfiguredClass"));
-        assertEquals("key".hashCode(), ctx.typeId("Key"));
-        assertEquals("nonexistentclass3".hashCode(), ctx.typeId("NonExistentClass3"));
-        assertEquals("nonexistentclass4".hashCode(), ctx.typeId("NonExistentClass4"));
-        assertEquals(300, ctx.typeId(getClass().getSimpleName() + "$Value"));
-        assertEquals(400, ctx.typeId("NonExistentClass1"));
+        assertEquals(999, ctx.typeId("NotConfiguredClass"));
+        assertEquals(999, ctx.typeId("org.blabla.NotConfiguredClass"));
+
+        // BinaryIdMapper.typeId() contract.
+        assertEquals("notconfiguredspecialclass".hashCode(), ctx.typeId("org.blabla.NotConfiguredSpecialClass"));
+
+        assertEquals(991, ctx.typeId(Key.class.getName()));
+        assertEquals(992, ctx.typeId("org.gridgain.NonExistentClass3"));
+        assertEquals(993, ctx.typeId("NonExistentClass4"));
+
+        // Custom types.
+        assertEquals(300, ctx.typeId(Value.class.getName()));
+        assertEquals(400, ctx.typeId("org.gridgain.NonExistentClass1"));
         assertEquals(500, ctx.typeId("NonExistentClass2"));
-        assertEquals("nonexistentclass5".hashCode(), ctx.typeId("NonExistentClass5"));
+
+        // BinaryIdMapper.typeId() contract.
+        assertEquals("nonexistentclass0".hashCode(), ctx.typeId("NonExistentClass0"));
+
+        assertEquals(DateClass1.class.getName().hashCode(), ctx.typeId(DateClass1.class.getName()));
+        assertEquals("mytestclass".hashCode(), ctx.typeId(MyTestClass.class.getName()));
     }
 
     /**
@@ -1639,13 +2072,13 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         BinaryObject po = marshal(obj, marsh);
 
-        BinaryObject copy = copy(po, F.<String, Object>asMap("bArr", new byte[]{1, 2, 3}));
+        BinaryObject copy = copy(po, F.<String, Object>asMap("bArr", new byte[] {1, 2, 3}));
 
-        assertArrayEquals(new byte[]{1, 2, 3}, copy.<byte[]>field("bArr"));
+        assertArrayEquals(new byte[] {1, 2, 3}, copy.<byte[]>field("bArr"));
 
         SimpleObject obj0 = copy.deserialize();
 
-        assertArrayEquals(new byte[]{1, 2, 3}, obj0.bArr);
+        assertArrayEquals(new byte[] {1, 2, 3}, obj0.bArr);
     }
 
     /**
@@ -1676,7 +2109,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         BinaryObject po = marshal(obj, marsh);
 
-        BinaryObject copy = copy(po, F.<String, Object>asMap("sArr", new short[]{1, 2, 3}));
+        BinaryObject copy = copy(po, F.<String, Object>asMap("sArr", new short[] {1, 2, 3}));
 
         assertArrayEquals(new short[] {1, 2, 3}, copy.<short[]>field("sArr"));
 
@@ -1697,7 +2130,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         BinaryObject po = marshal(obj, marsh);
 
-        BinaryObject copy = copy(po, F.<String, Object>asMap("iArr", new int[]{1, 2, 3}));
+        BinaryObject copy = copy(po, F.<String, Object>asMap("iArr", new int[] {1, 2, 3}));
 
         assertArrayEquals(new int[] {1, 2, 3}, copy.<int[]>field("iArr"));
 
@@ -1718,7 +2151,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         BinaryObject po = marshal(obj, marsh);
 
-        BinaryObject copy = copy(po, F.<String, Object>asMap("lArr", new long[]{1, 2, 3}));
+        BinaryObject copy = copy(po, F.<String, Object>asMap("lArr", new long[] {1, 2, 3}));
 
         assertArrayEquals(new long[] {1, 2, 3}, copy.<long[]>field("lArr"));
 
@@ -1739,7 +2172,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         BinaryObject po = marshal(obj, marsh);
 
-        BinaryObject copy = copy(po, F.<String, Object>asMap("fArr", new float[]{1, 2, 3}));
+        BinaryObject copy = copy(po, F.<String, Object>asMap("fArr", new float[] {1, 2, 3}));
 
         assertArrayEquals(new float[] {1, 2, 3}, copy.<float[]>field("fArr"), 0);
 
@@ -1760,7 +2193,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         BinaryObject po = marshal(obj, marsh);
 
-        BinaryObject copy = copy(po, F.<String, Object>asMap("dArr", new double[]{1, 2, 3}));
+        BinaryObject copy = copy(po, F.<String, Object>asMap("dArr", new double[] {1, 2, 3}));
 
         assertArrayEquals(new double[] {1, 2, 3}, copy.<double[]>field("dArr"), 0);
 
@@ -1781,13 +2214,13 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         BinaryObject po = marshal(obj, marsh);
 
-        BinaryObject copy = copy(po, F.<String, Object>asMap("cArr", new char[]{1, 2, 3}));
+        BinaryObject copy = copy(po, F.<String, Object>asMap("cArr", new char[] {1, 2, 3}));
 
-        assertArrayEquals(new char[]{1, 2, 3}, copy.<char[]>field("cArr"));
+        assertArrayEquals(new char[] {1, 2, 3}, copy.<char[]>field("cArr"));
 
         SimpleObject obj0 = copy.deserialize();
 
-        assertArrayEquals(new char[]{1, 2, 3}, obj0.cArr);
+        assertArrayEquals(new char[] {1, 2, 3}, obj0.cArr);
     }
 
     /**
@@ -1802,13 +2235,13 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         BinaryObject po = marshal(obj, marsh);
 
-        BinaryObject copy = copy(po, F.<String, Object>asMap("strArr", new String[]{"str1", "str2"}));
+        BinaryObject copy = copy(po, F.<String, Object>asMap("strArr", new String[] {"str1", "str2"}));
 
-        assertArrayEquals(new String[]{"str1", "str2"}, copy.<String[]>field("strArr"));
+        assertArrayEquals(new String[] {"str1", "str2"}, copy.<String[]>field("strArr"));
 
         SimpleObject obj0 = copy.deserialize();
 
-        assertArrayEquals(new String[]{"str1", "str2"}, obj0.strArr);
+        assertArrayEquals(new String[] {"str1", "str2"}, obj0.strArr);
     }
 
     /**
@@ -1860,19 +2293,19 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         map.put("str", "str555");
         map.put("inner", newObj);
-        map.put("bArr", new byte[]{6, 7, 9});
+        map.put("bArr", new byte[] {6, 7, 9});
 
         BinaryObject copy = copy(po, map);
 
         assertEquals("str555", copy.<String>field("str"));
         assertEquals(newObj, copy.<BinaryObject>field("inner").deserialize());
-        assertArrayEquals(new byte[]{6, 7, 9}, copy.<byte[]>field("bArr"));
+        assertArrayEquals(new byte[] {6, 7, 9}, copy.<byte[]>field("bArr"));
 
         SimpleObject obj0 = copy.deserialize();
 
         assertEquals("str555", obj0.str);
         assertEquals(newObj, obj0.inner);
-        assertArrayEquals(new byte[]{6, 7, 9}, obj0.bArr);
+        assertArrayEquals(new byte[] {6, 7, 9}, obj0.bArr);
     }
 
     /**
@@ -1897,8 +2330,8 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         map.put("str", "str555");
         map.put("inner", newObj);
         map.put("s", (short)2323);
-        map.put("bArr", new byte[]{6, 7, 9});
-        map.put("b", (byte) 111);
+        map.put("bArr", new byte[] {6, 7, 9});
+        map.put("b", (byte)111);
 
         BinaryObject copy = copy(po, map);
 
@@ -1915,8 +2348,8 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         assertEquals("str555", obj0.str);
         assertEquals(newObj, obj0.inner);
         assertEquals((short)2323, obj0.s);
-        assertArrayEquals(new byte[]{6, 7, 9}, obj0.bArr);
-        assertEquals((byte) 111, obj0.b);
+        assertArrayEquals(new byte[] {6, 7, 9}, obj0.bArr);
+        assertEquals((byte)111, obj0.b);
     }
 
     /**
@@ -2020,13 +2453,13 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
             assertFalse(offheapObj2.equals(offheapObj));
         }
         finally {
-            UNSAFE.freeMemory(ptr);
+            GridUnsafe.freeMemory(ptr);
 
             if (ptr1 > 0)
-                UNSAFE.freeMemory(ptr1);
+                GridUnsafe.freeMemory(ptr1);
 
             if (ptr2 > 0)
-                UNSAFE.freeMemory(ptr2);
+                GridUnsafe.freeMemory(ptr2);
         }
     }
 
@@ -2089,7 +2522,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         DecimalReflective obj1 = new DecimalReflective();
 
         obj1.val = BigDecimal.ZERO;
-        obj1.valArr = new BigDecimal[] { BigDecimal.ONE, BigDecimal.TEN };
+        obj1.valArr = new BigDecimal[] {BigDecimal.ONE, BigDecimal.TEN};
 
         BinaryObjectImpl portObj = marshal(obj1, marsh);
 
@@ -2103,9 +2536,9 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         DecimalMarshalAware obj2 = new DecimalMarshalAware();
 
         obj2.val = BigDecimal.ZERO;
-        obj2.valArr = new BigDecimal[] { BigDecimal.ONE, BigDecimal.TEN.negate() };
+        obj2.valArr = new BigDecimal[] {BigDecimal.ONE, BigDecimal.TEN.negate()};
         obj2.rawVal = BigDecimal.TEN;
-        obj2.rawValArr = new BigDecimal[] { BigDecimal.ZERO, BigDecimal.ONE };
+        obj2.rawValArr = new BigDecimal[] {BigDecimal.ZERO, BigDecimal.ONE};
 
         portObj = marshal(obj2, marsh);
 
@@ -2175,8 +2608,9 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     /**
      * @throws Exception If failed.
      */
-    public void testDuplicateName() throws Exception {
-        BinaryMarshaller marsh = binaryMarshaller();
+    public void testDuplicateNameSimpleNameMapper() throws Exception {
+        BinaryMarshaller marsh = binaryMarshaller(new BinaryBasicNameMapper(true),
+            new BinaryBasicIdMapper(true), null, null);
 
         Test1.Job job1 = new Test1().new Job();
         Test2.Job job2 = new Test2().new Job();
@@ -2193,6 +2627,21 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         }
 
         assert false;
+    }
+
+    /**
+     * @throws Exception If failed.
+     */
+    public void testDuplicateNameFullNameMapper() throws Exception {
+        BinaryMarshaller marsh = binaryMarshaller(new BinaryBasicNameMapper(false),
+            new BinaryBasicIdMapper(false), null, null);
+
+        Test1.Job job1 = new Test1().new Job();
+        Test2.Job job2 = new Test2().new Job();
+
+        marsh.marshal(job1);
+
+        marsh.marshal(job2);
     }
 
     /**
@@ -2273,13 +2722,13 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     public void testPredefinedTypeIds() throws Exception {
         BinaryMarshaller marsh = binaryMarshaller();
 
-        BinaryContext pCtx = binaryContext(marsh);
+        BinaryContext bCtx = binaryContext(marsh);
 
-        Field field = pCtx.getClass().getDeclaredField("predefinedTypeNames");
+        Field field = bCtx.getClass().getDeclaredField("predefinedTypeNames");
 
         field.setAccessible(true);
 
-        Map<String, Integer> map = (Map<String, Integer>)field.get(pCtx);
+        Map<String, Integer> map = (Map<String, Integer>)field.get(bCtx);
 
         assertTrue(map.size() > 0);
 
@@ -2289,46 +2738,10 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
             if (id == GridBinaryMarshaller.UNREGISTERED_TYPE_ID)
                 continue;
 
-            BinaryClassDescriptor desc = pCtx.descriptorForTypeId(false, entry.getValue(), null, false);
+            BinaryClassDescriptor desc = bCtx.descriptorForTypeId(false, entry.getValue(), null, false);
 
-            assertEquals(desc.typeId(), pCtx.typeId(desc.describedClass().getName()));
-            assertEquals(desc.typeId(), pCtx.typeId(pCtx.typeName(desc.describedClass().getName())));
+            assertEquals(desc.typeId(), bCtx.typeId(desc.describedClass().getName()));
         }
-    }
-
-    /**
-     * @throws Exception If failed.
-     */
-    public void testCyclicReferencesMarshalling() throws Exception {
-        BinaryMarshaller marsh = binaryMarshaller();
-
-        SimpleObject obj = simpleObject();
-
-        obj.bArr = obj.inner.bArr;
-        obj.cArr = obj.inner.cArr;
-        obj.boolArr = obj.inner.boolArr;
-        obj.sArr = obj.inner.sArr;
-        obj.strArr = obj.inner.strArr;
-        obj.iArr = obj.inner.iArr;
-        obj.lArr = obj.inner.lArr;
-        obj.fArr = obj.inner.fArr;
-        obj.dArr = obj.inner.dArr;
-        obj.dateArr = obj.inner.dateArr;
-        obj.uuidArr = obj.inner.uuidArr;
-        obj.objArr = obj.inner.objArr;
-        obj.bdArr = obj.inner.bdArr;
-        obj.map = obj.inner.map;
-        obj.col = obj.inner.col;
-        obj.mEntry = obj.inner.mEntry;
-
-        SimpleObject res = (SimpleObject)marshalUnmarshal(obj, marsh);
-
-        assertEquals(obj, res);
-
-        assertTrue(res.objArr == res.inner.objArr);
-        assertTrue(res.map == res.inner.map);
-        assertTrue(res.col == res.inner.col);
-        assertTrue(res.mEntry == res.inner.mEntry);
     }
 
     /**
@@ -2359,6 +2772,92 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     }
 
     /**
+     * Test object with {@link Proxy} field.
+     *
+     * @throws Exception If fails.
+     */
+    public void testObjectContainingProxy() throws Exception {
+        BinaryMarshaller marsh = binaryMarshaller();
+
+        SomeItf inItf = (SomeItf)Proxy.newProxyInstance(
+            BinaryMarshallerSelfTest.class.getClassLoader(), new Class[] {SomeItf.class},
+            new InvocationHandler() {
+                private NonSerializable obj = new NonSerializable(null);
+
+                @Override public Object invoke(Object proxy, Method mtd, Object[] args) throws Throwable {
+                    if ("hashCode".equals(mtd.getName()))
+                        return obj.hashCode();
+
+                    obj.checkAfterUnmarshalled();
+
+                    return 17;
+                }
+            }
+        );
+
+        SomeItf outItf = marsh.unmarshal(marsh.marshal(inItf), null);
+
+        assertEquals(outItf.checkAfterUnmarshalled(), 17);
+    }
+
+    /**
+     * Test duplicate fields.
+     *
+     * @throws Exception If failed.
+     */
+    public void testDuplicateFields() throws Exception {
+        BinaryMarshaller marsh = binaryMarshaller();
+
+        DuplicateFieldsB obj = new DuplicateFieldsB(1, 2);
+
+        BinaryObjectImpl objBin = marshal(obj, marsh);
+
+        String fieldName = "x";
+        String fieldNameA = DuplicateFieldsA.class.getName() + "." + fieldName;
+        String fieldNameB = DuplicateFieldsB.class.getName() + "." + fieldName;
+
+        // Check "hasField".
+        assert !objBin.hasField(fieldName);
+        assert objBin.hasField(fieldNameA);
+        assert objBin.hasField(fieldNameB);
+
+        // Check direct field access.
+        assertNull(objBin.field(fieldName));
+        assertEquals(Integer.valueOf(1), objBin.field(fieldNameA));
+        assertEquals(Integer.valueOf(2), objBin.field(fieldNameB));
+
+        // Check metadata.
+        BinaryType type = objBin.type();
+
+        Collection<String> fieldNames = type.fieldNames();
+
+        assertEquals(2, fieldNames.size());
+
+        assert !fieldNames.contains(fieldName);
+        assert fieldNames.contains(fieldNameA);
+        assert fieldNames.contains(fieldNameB);
+
+        // Check field access through type.
+        BinaryField field = type.field(fieldName);
+        BinaryField fieldA = type.field(fieldNameA);
+        BinaryField fieldB = type.field(fieldNameB);
+
+        assert !field.exists(objBin);
+        assert fieldA.exists(objBin);
+        assert fieldB.exists(objBin);
+
+        assertNull(field.value(objBin));
+        assertEquals(Integer.valueOf(1), fieldA.value(objBin));
+        assertEquals(Integer.valueOf(2), fieldB.value(objBin));
+
+        // Check object deserialization.
+        DuplicateFieldsB deserialized = objBin.deserialize();
+
+        assertEquals(obj.xA(), deserialized.xA());
+        assertEquals(obj.xB(), deserialized.xB());
+    }
+
+    /**
      *
      */
     private static interface SomeItf {
@@ -2371,7 +2870,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     /**
      * Some non-serializable class.
      */
-    @SuppressWarnings( {"PublicField","TransientFieldInNonSerializableClass","FieldMayBeStatic"})
+    @SuppressWarnings({"PublicField", "TransientFieldInNonSerializableClass", "FieldMayBeStatic"})
     private static class NonSerializableA {
         /** */
         private final long longVal = 0x33445566778899AAL;
@@ -2380,7 +2879,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         protected Short shortVal = (short)0xAABB;
 
         /** */
-        public String[] strArr = {"AA","BB"};
+        public String[] strArr = {"AA", "BB"};
 
         /** */
         public boolean flag1 = true;
@@ -2404,7 +2903,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
          * @param strArr Array.
          * @param shortVal Short value.
          */
-        @SuppressWarnings( {"UnusedDeclaration"})
+        @SuppressWarnings({"UnusedDeclaration"})
         private NonSerializableA(@Nullable String[] strArr, @Nullable Short shortVal) {
             // No-op.
         }
@@ -2417,7 +2916,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
             assertEquals(shortVal.shortValue(), (short)0xAABB);
 
-            assertTrue(Arrays.equals(strArr, new String[] {"AA","BB"}));
+            assertTrue(Arrays.equals(strArr, new String[] {"AA", "BB"}));
 
             assertEquals(0, intVal);
 
@@ -2432,7 +2931,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     /**
      * Some non-serializable class.
      */
-    @SuppressWarnings( {"PublicField","TransientFieldInNonSerializableClass","PackageVisibleInnerClass"})
+    @SuppressWarnings({"PublicField", "TransientFieldInNonSerializableClass", "PackageVisibleInnerClass"})
     static class NonSerializableB extends NonSerializableA {
         /** */
         public Short shortValue = 0x1122;
@@ -2476,7 +2975,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     /**
      * Some non-serializable class.
      */
-    @SuppressWarnings( {"TransientFieldInNonSerializableClass","PublicField"})
+    @SuppressWarnings({"TransientFieldInNonSerializableClass", "PublicField"})
     private static class NonSerializable extends NonSerializableB {
         /** */
         private int idVal = -17;
@@ -2501,7 +3000,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
          *
          * @param aVal Unused.
          */
-        @SuppressWarnings( {"UnusedDeclaration"})
+        @SuppressWarnings({"UnusedDeclaration"})
         private NonSerializable(NonSerializableA aVal) {
         }
 
@@ -2517,11 +3016,10 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
             assertNull(bVal);
 
-            for (NonSerializableA a : bArr) {
+            for (NonSerializableA a : bArr)
                 a.checkAfterUnmarshalled();
-            }
 
-            assertEquals(floatVal, 567.89F);
+            assertEquals(floatVal, 567.89F, 0);
         }
     }
 
@@ -2581,9 +3079,9 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     private long copyOffheap(BinaryObjectImpl obj) {
         byte[] arr = obj.array();
 
-        long ptr = UNSAFE.allocateMemory(arr.length);
+        long ptr = GridUnsafe.allocateMemory(arr.length);
 
-        UNSAFE.copyMemory(arr, BYTE_ARR_OFF, null, ptr, arr.length);
+        GridUnsafe.copyMemory(arr, GridUnsafe.BYTE_ARR_OFF, null, ptr, arr.length);
 
         return ptr;
     }
@@ -2678,7 +3176,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
      */
     protected BinaryMarshaller binaryMarshaller()
         throws IgniteCheckedException {
-        return binaryMarshaller(null, null, null);
+        return binaryMarshaller(null, null, null, null);
     }
 
     /**
@@ -2686,15 +3184,16 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
      */
     protected BinaryMarshaller binaryMarshaller(Collection<BinaryTypeConfiguration> cfgs)
         throws IgniteCheckedException {
-        return binaryMarshaller(null, null, cfgs);
+        return binaryMarshaller(null, null, null, cfgs);
     }
 
     /**
      *
      */
-    protected BinaryMarshaller binaryMarshaller(BinaryIdMapper mapper, Collection<BinaryTypeConfiguration> cfgs)
+    protected BinaryMarshaller binaryMarshaller(BinaryNameMapper nameMapper, BinaryIdMapper mapper,
+        Collection<BinaryTypeConfiguration> cfgs)
         throws IgniteCheckedException {
-        return binaryMarshaller(mapper, null, cfgs);
+        return binaryMarshaller(nameMapper, mapper, null, cfgs);
     }
 
     /**
@@ -2702,13 +3201,14 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
      */
     protected BinaryMarshaller binaryMarshaller(BinarySerializer serializer, Collection<BinaryTypeConfiguration> cfgs)
         throws IgniteCheckedException {
-        return binaryMarshaller(null, serializer, cfgs);
+        return binaryMarshaller(null, null, serializer, cfgs);
     }
 
     /**
      * @return Binary marshaller.
      */
     protected BinaryMarshaller binaryMarshaller(
+        BinaryNameMapper nameMapper,
         BinaryIdMapper mapper,
         BinarySerializer serializer,
         Collection<BinaryTypeConfiguration> cfgs
@@ -2717,6 +3217,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         BinaryConfiguration bCfg = new BinaryConfiguration();
 
+        bCfg.setNameMapper(nameMapper);
         bCfg.setIdMapper(mapper);
         bCfg.setSerializer(serializer);
         bCfg.setCompactFooter(compactFooter());
@@ -2725,7 +3226,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         iCfg.setBinaryConfiguration(bCfg);
 
-        BinaryContext ctx = new BinaryContext(BinaryCachingMetadataHandler.create(), iCfg);
+        BinaryContext ctx = new BinaryContext(BinaryCachingMetadataHandler.create(), iCfg, new NullLogger());
 
         BinaryMarshaller marsh = new BinaryMarshaller();
 
@@ -2799,8 +3300,6 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         inner.map.put(2, "str2");
         inner.map.put(3, "str3");
 
-        inner.mEntry = inner.map.entrySet().iterator().next();
-
         SimpleObject outer = new SimpleObject();
 
         outer.b = 2;
@@ -2834,7 +3333,6 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         outer.inner = inner;
         outer.bdArr = new BigDecimal[] {new BigDecimal(5000), BigDecimal.TEN};
 
-
         outer.col.add("str4");
         outer.col.add("str5");
         outer.col.add("str6");
@@ -2842,8 +3340,6 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         outer.map.put(4, "str4");
         outer.map.put(5, "str5");
         outer.map.put(6, "str6");
-
-        outer.mEntry = outer.map.entrySet().iterator().next();
 
         return outer;
     }
@@ -3142,9 +3638,6 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
         /** */
         private TestEnum[] enumArr;
-
-        /** */
-        private Map.Entry<Integer, String> mEntry;
 
         /** */
         private SimpleObject inner;
@@ -3628,6 +4121,18 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
     /**
      */
+    private static class InnerMappedObject extends CustomMappedObject1 {
+        /**
+         * @param val1 Val1
+         * @param val2 Val2
+         */
+        InnerMappedObject(int val1, String val2) {
+            super(val1, val2);
+        }
+    }
+
+    /**
+     */
     private static class CustomMappedObject2 {
         /** */
         private int val1;
@@ -3906,7 +4411,9 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
             // No-op.
         }
 
-        /**n
+        /**
+         * n
+         *
          * @param key Key.
          */
         private Key(int key) {
@@ -3950,6 +4457,24 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
          */
         private Value(int val) {
             this.val = val;
+        }
+
+        /** {@inheritDoc} */
+        @Override public boolean equals(Object o) {
+            if (this == o)
+                return true;
+
+            if (!(o instanceof Value))
+                return false;
+
+            Value value = (Value)o;
+
+            return val == value.val;
+        }
+
+        /** {@inheritDoc} */
+        @Override public int hashCode() {
+            return val;
         }
     }
 
@@ -3999,7 +4524,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
      */
     private static class ProtectedConstructor {
         /**
-         *  Protected constructor.
+         * Protected constructor.
          */
         protected ProtectedConstructor() {
             // No-op.
@@ -4055,8 +4580,7 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
         /** */
         private String s;
 
-        /** Initializer. */
-        {
+        /** Initializer. */ {
             StringBuilder builder = new StringBuilder();
 
             for (int i = 0; i < 10000; i++) {
@@ -4107,6 +4631,13 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     public static class SimpleExternalizable implements Externalizable {
         /** */
         private String field;
+
+        /**
+         * {@link Externalizable} support.
+         */
+        public SimpleExternalizable() {
+            // No-op.
+        }
 
         /**
          * @param field Field.
@@ -4164,6 +4695,57 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
     }
 
     /**
+     * Class B for duplicate fields test.
+     */
+    private static class DuplicateFieldsA {
+        /** Field. */
+        int x;
+
+        /**
+         * Constructor.
+         *
+         * @param x Field.
+         */
+        protected DuplicateFieldsA(int x) {
+            this.x = x;
+        }
+
+        /**
+         * @return A's field.
+         */
+        public int xA() {
+            return x;
+        }
+    }
+
+    /**
+     * Class B for duplicate fields test.
+     */
+    private static class DuplicateFieldsB extends DuplicateFieldsA {
+        /** Field. */
+        int x;
+
+        /**
+         * Constructor.
+         *
+         * @param xA Field for parent class.
+         * @param xB Field for current class.
+         */
+        public DuplicateFieldsB(int xA, int xB) {
+            super(xA);
+
+            this.x = xB;
+        }
+
+        /**
+         * @return B's field.
+         */
+        public int xB() {
+            return x;
+        }
+    }
+
+    /**
      *
      */
     private static class DecimalReflective {
@@ -4204,6 +4786,27 @@ public class BinaryMarshallerSelfTest extends GridCommonAbstractTest {
 
             rawVal = rawReader.readDecimal();
             rawValArr = rawReader.readDecimalArray();
+        }
+    }
+
+    /**
+     * Wrapper object.
+     */
+    private static class Wrapper {
+
+        /** Value. */
+        private final Object value;
+
+        /** Constructor. */
+        public Wrapper(Object value) {
+            this.value = value;
+        }
+
+        /**
+         * @return Value.
+         */
+        public Object getValue() {
+            return value;
         }
     }
 }

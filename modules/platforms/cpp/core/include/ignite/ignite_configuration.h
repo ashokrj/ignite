@@ -15,14 +15,19 @@
  * limitations under the License.
  */
 
-#ifndef _IGNITE_CONFIGURATION
-#define _IGNITE_CONFIGURATION
+/**
+ * @file
+ * Declares ignite::IgniteConfiguration class.
+ */
+
+#ifndef _IGNITE_IGNITE_CONFIGURATION
+#define _IGNITE_IGNITE_CONFIGURATION
 
 #include <stdint.h>
 #include <string>
 #include <list>
 
-#include "ignite/impl/utils.h"
+#include <ignite/common/utils.h>
 
 namespace ignite
 {
@@ -63,4 +68,4 @@ namespace ignite
     };    
 }
 
-#endif
+#endif //_IGNITE_IGNITE_CONFIGURATION

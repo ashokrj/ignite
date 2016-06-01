@@ -126,8 +126,6 @@ public class CrossCacheTxRandomOperationsTest extends GridCommonAbstractTest {
      * @throws Exception If failed.
      */
     public void testCrossCacheTxOperationsFairAffinity() throws Exception {
-        fail("https://issues.apache.org/jira/browse/IGNITE-647");
-
         txOperations(PARTITIONED, FULL_SYNC, true, true);
     }
 
@@ -152,7 +150,7 @@ public class CrossCacheTxRandomOperationsTest extends GridCommonAbstractTest {
      * @param fairAff If {@code true} uses {@link FairAffinityFunction}, otherwise {@link RendezvousAffinityFunction}.
      * @return Cache configuration.
      */
-    private CacheConfiguration cacheConfiguration(String name,
+    protected CacheConfiguration cacheConfiguration(String name,
         CacheMode cacheMode,
         CacheWriteSynchronizationMode writeSync,
         boolean fairAff) {
@@ -172,6 +170,13 @@ public class CrossCacheTxRandomOperationsTest extends GridCommonAbstractTest {
     }
 
     /**
+     */
+    protected void createCache(CacheMode cacheMode, CacheWriteSynchronizationMode writeSync, boolean fairAff,
+        Ignite ignite, String name) {
+        ignite.createCache(cacheConfiguration(name, cacheMode, writeSync, fairAff));
+    }
+
+    /**
      * @param cacheMode Cache mode.
      * @param writeSync Write synchronization mode.
      * @param crossCacheTx If {@code true} uses cross cache transaction.
@@ -185,8 +190,8 @@ public class CrossCacheTxRandomOperationsTest extends GridCommonAbstractTest {
         Ignite ignite = ignite(0);
 
         try {
-            ignite.createCache(cacheConfiguration(CACHE1, cacheMode, writeSync, fairAff));
-            ignite.createCache(cacheConfiguration(CACHE2, cacheMode, writeSync, fairAff));
+            createCache(cacheMode, writeSync, fairAff, ignite, CACHE1);
+            createCache(cacheMode, writeSync, fairAff, ignite, CACHE2);
 
             txOperations(PESSIMISTIC, REPEATABLE_READ, crossCacheTx, false);
             txOperations(PESSIMISTIC, REPEATABLE_READ, crossCacheTx, true);

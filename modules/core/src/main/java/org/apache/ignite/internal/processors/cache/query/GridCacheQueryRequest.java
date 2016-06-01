@@ -30,6 +30,7 @@ import org.apache.ignite.internal.processors.cache.GridCacheSharedContext;
 import org.apache.ignite.internal.util.typedef.F;
 import org.apache.ignite.internal.util.typedef.internal.CU;
 import org.apache.ignite.internal.util.typedef.internal.S;
+import org.apache.ignite.internal.util.typedef.internal.U;
 import org.apache.ignite.lang.IgniteBiPredicate;
 import org.apache.ignite.lang.IgniteClosure;
 import org.apache.ignite.lang.IgniteReducer;
@@ -111,7 +112,7 @@ public class GridCacheQueryRequest extends GridCacheMessage implements GridCache
     private boolean all;
 
     /** */
-    private boolean keepBinary;
+    private boolean keepPortable;
 
     /** */
     private UUID subjId;
@@ -192,7 +193,7 @@ public class GridCacheQueryRequest extends GridCacheMessage implements GridCache
         this.incBackups = incBackups;
         this.fields = fields;
         this.all = all;
-        this.keepBinary = keepBinary;
+        this.keepPortable = keepBinary;
         this.subjId = subjId;
         this.taskHash = taskHash;
         this.topVer = topVer;
@@ -262,7 +263,7 @@ public class GridCacheQueryRequest extends GridCacheMessage implements GridCache
         this.incBackups = incBackups;
         this.args = args;
         this.incMeta = incMeta;
-        this.keepBinary = keepBinary;
+        this.keepPortable = keepBinary;
         this.subjId = subjId;
         this.taskHash = taskHash;
         this.topVer = topVer;
@@ -280,28 +281,28 @@ public class GridCacheQueryRequest extends GridCacheMessage implements GridCache
 
         GridCacheContext cctx = ctx.cacheContext(cacheId);
 
-        if (keyValFilter != null) {
+        if (keyValFilter != null && keyValFilterBytes == null) {
             if (addDepInfo)
                 prepareObject(keyValFilter, cctx);
 
             keyValFilterBytes = CU.marshal(cctx, keyValFilter);
         }
 
-        if (rdc != null) {
+        if (rdc != null && rdcBytes == null) {
             if (addDepInfo)
                 prepareObject(rdc, cctx);
 
             rdcBytes = CU.marshal(cctx, rdc);
         }
 
-        if (trans != null) {
+        if (trans != null && transBytes == null) {
             if (addDepInfo)
                 prepareObject(trans, cctx);
 
             transBytes = CU.marshal(cctx, trans);
         }
 
-        if (!F.isEmpty(args)) {
+        if (!F.isEmpty(args) && argsBytes == null) {
             if (addDepInfo) {
                 for (Object arg : args)
                     prepareObject(arg, cctx);
@@ -317,17 +318,17 @@ public class GridCacheQueryRequest extends GridCacheMessage implements GridCache
 
         Marshaller mrsh = ctx.marshaller();
 
-        if (keyValFilterBytes != null)
-            keyValFilter = mrsh.unmarshal(keyValFilterBytes, ldr);
+        if (keyValFilterBytes != null && keyValFilter == null)
+            keyValFilter = mrsh.unmarshal(keyValFilterBytes, U.resolveClassLoader(ldr, ctx.gridConfig()));
 
-        if (rdcBytes != null)
+        if (rdcBytes != null && rdc == null)
             rdc = mrsh.unmarshal(rdcBytes, ldr);
 
-        if (transBytes != null)
-            trans = mrsh.unmarshal(transBytes, ldr);
+        if (transBytes != null && trans == null)
+            trans = mrsh.unmarshal(transBytes, U.resolveClassLoader(ldr, ctx.gridConfig()));
 
-        if (argsBytes != null)
-            args = mrsh.unmarshal(argsBytes, ldr);
+        if (argsBytes != null && args == null)
+            args = mrsh.unmarshal(argsBytes, U.resolveClassLoader(ldr, ctx.gridConfig()));
     }
 
     /** {@inheritDoc} */
@@ -342,8 +343,10 @@ public class GridCacheQueryRequest extends GridCacheMessage implements GridCache
     void beforeLocalExecution(GridCacheContext ctx) throws IgniteCheckedException {
         Marshaller marsh = ctx.marshaller();
 
-        rdc = rdc != null ? marsh.<IgniteReducer<Object, Object>>unmarshal(marsh.marshal(rdc), null) : null;
-        trans = trans != null ? marsh.<IgniteClosure<Object, Object>>unmarshal(marsh.marshal(trans), null) : null;
+        rdc = rdc != null ? marsh.<IgniteReducer<Object, Object>>unmarshal(marsh.marshal(rdc),
+            U.resolveClassLoader(ctx.gridConfig())) : null;
+        trans = trans != null ? marsh.<IgniteClosure<Object, Object>>unmarshal(marsh.marshal(trans),
+            U.resolveClassLoader(ctx.gridConfig())) : null;
     }
 
     /**
@@ -455,7 +458,7 @@ public class GridCacheQueryRequest extends GridCacheMessage implements GridCache
      * @return Whether to keep binary.
      */
     public boolean keepBinary() {
-        return keepBinary;
+        return keepPortable;
     }
 
     /**
@@ -555,7 +558,7 @@ public class GridCacheQueryRequest extends GridCacheMessage implements GridCache
                 writer.incrementState();
 
             case 13:
-                if (!writer.writeBoolean("keepBinary", keepBinary))
+                if (!writer.writeBoolean("keepPortable", keepPortable))
                     return false;
 
                 writer.incrementState();
@@ -711,7 +714,7 @@ public class GridCacheQueryRequest extends GridCacheMessage implements GridCache
                 reader.incrementState();
 
             case 13:
-                keepBinary = reader.readBoolean("keepBinary");
+                keepPortable = reader.readBoolean("keepPortable");
 
                 if (!reader.isLastRead())
                     return false;

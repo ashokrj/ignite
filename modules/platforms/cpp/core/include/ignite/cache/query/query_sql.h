@@ -15,8 +15,13 @@
  * limitations under the License.
  */
 
-#ifndef _IGNITE_CACHE_QUERY_SQL
-#define _IGNITE_CACHE_QUERY_SQL
+/**
+ * @file
+ * Declares ignite::cache::query::SqlQuery class.
+ */
+
+#ifndef _IGNITE_CACHE_QUERY_QUERY_SQL
+#define _IGNITE_CACHE_QUERY_QUERY_SQL
 
 #include <stdint.h>
 #include <string>
@@ -44,7 +49,7 @@ namespace ignite
                  * @param sql SQL string.
                  */
                 SqlQuery(const std::string& type, const std::string& sql) : type(type), sql(sql), pageSize(1024), 
-                    loc(false), args(NULL)
+                    loc(false), args()
                 {
                     // No-op.
                 }
@@ -240,4 +245,4 @@ namespace ignite
     }    
 }
 
-#endif
+#endif //_IGNITE_CACHE_QUERY_QUERY_SQL

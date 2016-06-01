@@ -24,6 +24,8 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import javax.cache.Cache;
+import org.apache.ignite.binary.BinaryBasicIdMapper;
+import org.apache.ignite.binary.BinaryBasicNameMapper;
 import org.apache.ignite.cache.store.CacheStoreAdapter;
 import org.apache.ignite.configuration.BinaryConfiguration;
 import org.apache.ignite.configuration.CacheConfiguration;
@@ -46,12 +48,18 @@ public abstract class GridCacheBinaryStoreAbstractSelfTest extends GridCommonAbs
     /** */
     private static final TestStore STORE = new TestStore();
 
+    /** */
+    protected static IgniteConfiguration cfg;
+
     /** {@inheritDoc} */
     @SuppressWarnings("unchecked")
     @Override protected IgniteConfiguration getConfiguration(String gridName) throws Exception {
         IgniteConfiguration cfg = super.getConfiguration(gridName);
 
         BinaryConfiguration bCfg = new BinaryConfiguration();
+
+        bCfg.setNameMapper(new BinaryBasicNameMapper(false));
+        bCfg.setIdMapper(new BinaryBasicIdMapper(false));
 
         bCfg.setClassNames(Arrays.asList(Key.class.getName(), Value.class.getName()));
 
@@ -62,7 +70,7 @@ public abstract class GridCacheBinaryStoreAbstractSelfTest extends GridCommonAbs
         CacheConfiguration cacheCfg = new CacheConfiguration();
 
         cacheCfg.setCacheStoreFactory(singletonFactory(STORE));
-        cacheCfg.setKeepBinaryInStore(keepBinaryInStore());
+        cacheCfg.setStoreKeepBinary(keepBinaryInStore());
         cacheCfg.setReadThrough(true);
         cacheCfg.setWriteThrough(true);
         cacheCfg.setLoadPreviousValue(true);
@@ -74,6 +82,8 @@ public abstract class GridCacheBinaryStoreAbstractSelfTest extends GridCommonAbs
         disco.setIpFinder(IP_FINDER);
 
         cfg.setDiscoverySpi(disco);
+
+        GridCacheBinaryStoreAbstractSelfTest.cfg = cfg;
 
         return cfg;
     }

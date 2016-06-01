@@ -30,6 +30,7 @@ import org.apache.ignite.IgniteCache;
 import org.apache.ignite.IgniteCluster;
 import org.apache.ignite.IgniteCompute;
 import org.apache.ignite.IgniteCountDownLatch;
+import org.apache.ignite.IgniteLock;
 import org.apache.ignite.IgniteSemaphore;
 import org.apache.ignite.IgniteDataStreamer;
 import org.apache.ignite.IgniteEvents;
@@ -55,6 +56,7 @@ import org.apache.ignite.internal.binary.BinaryContext;
 import org.apache.ignite.internal.binary.builder.BinaryObjectBuilderImpl;
 import org.apache.ignite.internal.processors.cacheobject.NoOpBinary;
 import org.apache.ignite.lang.IgniteProductVersion;
+import org.apache.ignite.logger.NullLogger;
 import org.apache.ignite.marshaller.Marshaller;
 import org.apache.ignite.plugin.IgnitePlugin;
 import org.apache.ignite.plugin.PluginNotFoundException;
@@ -295,7 +297,7 @@ public class IgniteMock implements Ignite {
 
         if (ctx == null) {
             /** {@inheritDoc} */
-            ctx = new BinaryContext(BinaryCachingMetadataHandler.create(), configuration()) {
+            ctx = new BinaryContext(BinaryCachingMetadataHandler.create(), configuration(), new NullLogger()) {
                 @Override public int typeId(String typeName) {
                     return typeName.hashCode();
                 }
@@ -360,6 +362,15 @@ public class IgniteMock implements Ignite {
     @Nullable @Override public IgniteSemaphore semaphore(String name,
         int cnt,
         boolean failoverSafe,
+        boolean create)
+    {
+        return null;
+    }
+
+    /** {@inheritDoc} */
+    @Nullable @Override public IgniteLock reentrantLock(String name,
+        boolean failoverSafe,
+        boolean fair,
         boolean create)
     {
         return null;
